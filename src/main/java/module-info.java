@@ -14,6 +14,9 @@ module ms.rohde.openpgpicsfpoc {
     requires transitive org.jspecify;
     requires transitive jakarta.inject;
     requires transitive ms.rohde.hexagonalarch.annotations;
+    requires org.bouncycastle.pg;
+    requires org.bouncycastle.util;
+    requires org.bouncycastle.provider;
 
     exports ms.rohde.openpgpicsfpoc.core.domain;
     exports ms.rohde.openpgpicsfpoc.core.app;
@@ -21,4 +24,5 @@ module ms.rohde.openpgpicsfpoc {
     exports ms.rohde.openpgpicsfpoc.ports.outbound;
     exports ms.rohde.openpgpicsfpoc.ports.outbound.hsm;
     exports ms.rohde.openpgpicsfpoc.adapters.outbound.hsm.dummy;
+    exports ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 }
