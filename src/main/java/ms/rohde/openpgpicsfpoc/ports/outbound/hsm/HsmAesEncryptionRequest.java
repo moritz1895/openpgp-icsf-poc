@@ -22,6 +22,14 @@ import org.jspecify.annotations.Nullable;
  * Key-Import-Port voraussetzen. Das entspricht dem "Clear-Key"-Betriebsmodus
  * realer symmetrischer HSM-Verben (z. B. CCA Symmetric Key Encipher/Decipher
  * mit Klartextschluessel) im Gegensatz zu deren "Secure-Key"-Varianten.</p>
+ *
+ * <p><b>Leerer {@code input}-Wert nur bei GCM erlaubt:</b> ECB/CBC/CFB
+ * lehnen einen leeren {@code input} ab, da sie stets an echtem Blockmaterial
+ * operieren. GCM erlaubt ihn hingegen, da RFC 9580 Section 5.13.2 fuer das
+ * AEAD-Verschluesselungsprofil (SEIPD v2) einen abschliessenden,
+ * laengenauthentisierenden Nachrichten-Tag verlangt, der ueber leeren
+ * Klartext berechnet wird (siehe {@code HsmAeadChunkCodec#encryptFinalTag}
+ * und {@code #verifyFinalTag}).</p>
  */
 public record HsmAesEncryptionRequest(
         ByteSequence sessionKey,
@@ -42,8 +50,8 @@ public record HsmAesEncryptionRequest(
         if (sessionKey.isEmpty()) {
             throw new IllegalArgumentException("sessionKey darf nicht leer sein");
         }
-        if (input.isEmpty()) {
-            throw new IllegalArgumentException("input darf nicht leer sein");
+        if (input.isEmpty() && cipherMode != HsmAesCipherMode.GCM) {
+            throw new IllegalArgumentException("input darf nicht leer sein (ausser bei GCM)");
         }
 
         switch (cipherMode) {

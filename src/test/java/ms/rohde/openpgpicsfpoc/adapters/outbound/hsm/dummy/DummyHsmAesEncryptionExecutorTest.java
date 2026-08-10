@@ -46,6 +46,35 @@ class DummyHsmAesEncryptionExecutorTest {
     }
 
     @Test
+    void execute_givenGcmEncryptThenDecryptWithEmptyInput_thenRoundTripsToEmptyPlaintext() {
+        var sessionKey = randomBytes(32);
+        var iv = randomBytes(12);
+        var emptyInput = ByteSequence.empty();
+
+        var encryptResult = executor.execute(HsmAesEncryption.builder()
+                .sessionKey(sessionKey)
+                .cipherMode(HsmAesCipherMode.GCM)
+                .operation(HsmCipherOperation.ENCRYPT)
+                .input(emptyInput)
+                .initializationVector(iv)
+                .build());
+
+        assertThat(encryptResult.output()).isEqualTo(emptyInput);
+        assertThat(encryptResult.authenticationTag()).isNotNull();
+
+        var decryptResult = executor.execute(HsmAesEncryption.builder()
+                .sessionKey(sessionKey)
+                .cipherMode(HsmAesCipherMode.GCM)
+                .operation(HsmCipherOperation.DECRYPT)
+                .input(emptyInput)
+                .initializationVector(iv)
+                .authenticationTag(encryptResult.authenticationTag())
+                .build());
+
+        assertThat(decryptResult.output()).isEqualTo(emptyInput);
+    }
+
+    @Test
     void execute_givenCbcEncryptThenDecrypt_thenRoundTripsToOriginalPlaintext() {
         var sessionKey = randomBytes(32);
         var iv = randomBytes(16);

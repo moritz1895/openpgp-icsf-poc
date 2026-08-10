@@ -38,6 +38,31 @@ class HsmAesEncryptionTest {
     }
 
     @Test
+    void build_givenGcmWithEmptyInput_thenReturnsRequest() {
+        var request = HsmAesEncryption.builder()
+                .sessionKey(bytes(32))
+                .cipherMode(HsmAesCipherMode.GCM)
+                .operation(HsmCipherOperation.ENCRYPT)
+                .input(ByteSequence.empty())
+                .initializationVector(bytes(12))
+                .build();
+
+        assertThat(request.input().isEmpty()).isTrue();
+    }
+
+    @Test
+    void build_givenCbcWithEmptyInput_thenThrowsIllegalArgumentException() {
+        var builder = HsmAesEncryption.builder()
+                .sessionKey(bytes(32))
+                .cipherMode(HsmAesCipherMode.CBC)
+                .operation(HsmCipherOperation.ENCRYPT)
+                .input(ByteSequence.empty())
+                .initializationVector(bytes(16));
+
+        assertThatThrownBy(builder::build).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
     void build_givenGcmDecryptWithoutAuthenticationTag_thenThrowsIllegalArgumentException() {
         var builder = HsmAesEncryption.builder()
                 .sessionKey(bytes(32))

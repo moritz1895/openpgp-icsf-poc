@@ -1,43 +1,26 @@
 package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 
-import java.security.GeneralSecurityException;
 import java.util.Arrays;
 import java.util.Objects;
-import javax.crypto.Cipher;
-import javax.crypto.spec.GCMParameterSpec;
-import javax.crypto.spec.SecretKeySpec;
 import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesCipherMode;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryption;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmCipherOperation;
 
 /**
  * Gemeinsame Bausteine fuer das moderne, AEAD-basierte Verschluesselungsprofil
  * (SEIPD v2, RFC 9580 Section 5.13.2): Chunk-Groesse, Nonce-Ableitung je
  * Chunk sowie die einzelne AES-256-GCM-Chunk-Operation, die fuer jeden
- * echten Daten-Chunk ueber {@link HsmAesEncryptionExecutor} mit
- * {@link HsmAesCipherMode#GCM} ausgefuehrt wird (siehe Projektplan, Abschnitt
- * "Hsm-Primitives").
- *
- * <p><b>Bekannte, dokumentierte Einschraenkung des abschliessenden
- * Nachrichten-Tags:</b> RFC 9580 verlangt zusaetzlich zu den Daten-Chunks
- * einen abschliessenden, laengenauthentisierenden Tag, der ueber
- * <i>leeren</i> Klartext berechnet wird (Section 5.13.2). Der bereits
- * abgeschlossene {@code HsmAesEncryptionRequest}-Port (siehe
- * {@code ports.outbound.hsm.HsmAesEncryptionRequest}, ausserhalb des Scopes
- * dieser Iteration) lehnt leere {@code input}-Werte fuer <b>jeden</b>
- * Cipher-Modus grundsaetzlich ab und kann diese eine, strukturell
- * unvermeidbare Operation daher nicht abbilden. Da der dabei verwendete
- * Nachrichtenschluessel ohnehin ephemeres, HKDF-abgeleitetes, nie
- * persistiertes Material ist - vom Port selbst bereits als
- * "Clear-Key"-geeignet eingestuft (siehe JavaDoc auf
- * {@code HsmAesEncryptionRequest}) -, wird ausschliesslich dieser eine
- * Sonderfall lokal per {@code javax.crypto.Cipher} berechnet statt ueber die
- * HSM-Primitive; alle echten Nutzdaten-Chunks durchlaufen weiterhin
- * ausnahmslos die HSM. Diese Einschraenkung ist fuer eine spaetere
- * Port-Erweiterung (z. B. GCM-Ausnahme von der Nicht-leer-Regel) in
- * docs/technical zu dokumentieren.</p>
+ * echten Daten-Chunk sowie fuer den abschliessenden,
+ * laengenauthentisierenden Nachrichten-Tag (RFC 9580 Section 5.13.2, ueber
+ * <i>leeren</i> Klartext berechnet - siehe {@link HsmAesEncryptionRequest}
+ * fuer die dafuer vorgesehene GCM-Ausnahme von der sonst geltenden
+ * Nicht-leer-Regel fuer {@code input}) ueber {@link HsmAesEncryptionExecutor}
+ * mit {@link HsmAesCipherMode#GCM} ausgefuehrt wird (siehe Projektplan,
+ * Abschnitt "Hsm-Primitives"). Es findet an keiner Stelle dieser Klasse eine
+ * lokale symmetrische Verschluesselung mit echtem Schluesselmaterial statt.
  */
 final class HsmAeadChunkCodec {
 
@@ -110,34 +93,42 @@ final class HsmAeadChunkCodec {
 
     /**
      * Verschluesselt den abschliessenden, laengenauthentisierenden
-     * Nachrichten-Tag ueber leeren Klartext (RFC 9580 Section 5.13.2) - siehe
-     * Klassen-JavaDoc zur Begruendung, warum dieser eine Sonderfall lokal
-     * statt ueber die HSM-Primitive berechnet wird.
+     * Nachrichten-Tag ueber leeren Klartext (RFC 9580 Section 5.13.2) - wie
+     * jede echte Chunk-Operation ueber {@link HsmAesEncryptionExecutor}
+     * ausgefuehrt (leerer {@code input} ist fuer {@link HsmAesCipherMode#GCM}
+     * explizit zulaessig, siehe {@link HsmAesEncryptionRequest}).
      */
     byte[] encryptFinalTag(long chunkIndexAfterLast, long totalPlaintextBytes) {
-        try {
-            var cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            var spec = new GCMParameterSpec(TAG_LENGTH * 8, nonceForChunk(chunkIndexAfterLast));
-            cipher.init(Cipher.ENCRYPT_MODE, new SecretKeySpec(messageKey, "AES"), spec);
-            cipher.updateAAD(finalTagAssociatedData(totalPlaintextBytes));
-            return cipher.doFinal();
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("Berechnung des abschliessenden AEAD-Tags fehlgeschlagen", e);
-        }
+        var request = HsmAesEncryption.builder()
+                .sessionKey(ByteSequence.of(messageKey))
+                .cipherMode(HsmAesCipherMode.GCM)
+                .operation(HsmCipherOperation.ENCRYPT)
+                .input(ByteSequence.empty())
+                .initializationVector(ByteSequence.of(nonceForChunk(chunkIndexAfterLast)))
+                .additionalAuthenticatedData(ByteSequence.of(finalTagAssociatedData(totalPlaintextBytes)))
+                .build();
+        var result = executor.execute(request);
+        return Objects.requireNonNull(result.authenticationTag()).value();
     }
 
     /**
-     * Prueft den abschliessenden Nachrichten-Tag - lokales Gegenstueck zu
-     * {@link #encryptFinalTag(long, long)}.
+     * Prueft den abschliessenden Nachrichten-Tag - Gegenstueck zu
+     * {@link #encryptFinalTag(long, long)}, ebenfalls ueber
+     * {@link HsmAesEncryptionExecutor} ausgefuehrt.
      */
     void verifyFinalTag(byte[] tag, long chunkIndexAfterLast, long totalPlaintextBytes) {
         try {
-            var cipher = Cipher.getInstance("AES/GCM/NoPadding");
-            var spec = new GCMParameterSpec(TAG_LENGTH * 8, nonceForChunk(chunkIndexAfterLast));
-            cipher.init(Cipher.DECRYPT_MODE, new SecretKeySpec(messageKey, "AES"), spec);
-            cipher.updateAAD(finalTagAssociatedData(totalPlaintextBytes));
-            cipher.doFinal(tag);
-        } catch (GeneralSecurityException e) {
+            var request = HsmAesEncryption.builder()
+                    .sessionKey(ByteSequence.of(messageKey))
+                    .cipherMode(HsmAesCipherMode.GCM)
+                    .operation(HsmCipherOperation.DECRYPT)
+                    .input(ByteSequence.empty())
+                    .initializationVector(ByteSequence.of(nonceForChunk(chunkIndexAfterLast)))
+                    .additionalAuthenticatedData(ByteSequence.of(finalTagAssociatedData(totalPlaintextBytes)))
+                    .authenticationTag(ByteSequence.of(tag))
+                    .build();
+            executor.execute(request);
+        } catch (RuntimeException e) {
             throw new OpenPgpDecryptionFailedException("AEAD-Integritaetspruefung des Nachrichten-Tags fehlgeschlagen", e);
         }
     }
