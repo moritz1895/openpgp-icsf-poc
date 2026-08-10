@@ -1,0 +1,8 @@
+services:
+  app:
+    build: .
+    # Fester Tag statt des von Compose abgeleiteten Ordnernamens, damit das Image
+    # unabhaengig vom Checkout-Verzeichnisnamen reproduzierbar benannt ist.
+    image: openpgp-icsf-poc:latest
+    # Einmaliger CLI-Demo-Lauf (verschluesseln -> entschluesseln, signieren -> verifizieren)
+    # ueber alle unterstuetzten Profile (RSA, ECC nativ/klassisch, PQC-Komposit).
