@@ -1,0 +1,41 @@
+package ms.rohde.openpgpicsfpoc.architecture;
+
+import com.tngtech.archunit.junit.AnalyzeClasses;
+import com.tngtech.archunit.junit.ArchTest;
+import com.tngtech.archunit.lang.ArchRule;
+import ms.rohde.hexagonalarch.archunit.HexagonalArchitectureRules;
+
+/**
+ * Erzwingt die Einhaltung der Hexagonal-Architecture-Grundregeln aus
+ * CLAUDE.md ueber die gesamte Codebasis.
+ */
+@AnalyzeClasses(packages = "ms.rohde.openpgpicsfpoc")
+class ArchitectureTest {
+
+    @ArchTest
+    static final ArchRule drivingAdaptersMustNotDependOnApplicationServices =
+            HexagonalArchitectureRules.drivingAdaptersMustNotDependOnApplicationServices();
+
+    @ArchTest
+    static final ArchRule applicationServicesMustNotDependOnDrivingAdapters =
+            HexagonalArchitectureRules.applicationServicesMustNotDependOnDrivingAdapters();
+
+    @ArchTest
+    static final ArchRule applicationServicesMustNotDependOnInfrastructureAdapters =
+            HexagonalArchitectureRules.applicationServicesMustNotDependOnInfrastructureAdapters();
+
+    @ArchTest
+    static final ArchRule domainModelMustNotDependOnApplicationServices =
+            HexagonalArchitectureRules.domainModelMustNotDependOnApplicationServices();
+
+    @ArchTest
+    static final ArchRule domainModelMustNotDependOnAdapters =
+            HexagonalArchitectureRules.domainModelMustNotDependOnAdapters();
+
+    @ArchTest
+    static final ArchRule drivingPortsMustBeInterfaces = HexagonalArchitectureRules.drivingPortsMustBeInterfaces();
+
+    @ArchTest
+    static final ArchRule infrastructureServicePortsMustBeInterfaces =
+            HexagonalArchitectureRules.infrastructureServicePortsMustBeInterfaces();
+}
