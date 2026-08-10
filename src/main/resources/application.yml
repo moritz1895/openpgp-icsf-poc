@@ -1,0 +1,6 @@
+spring:
+  application:
+    name: openpgp-icsf-poc
+  main:
+    banner-mode: "off"
+    web-application-type: none
