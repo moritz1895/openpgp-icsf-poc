@@ -1,5 +1,17 @@
 # Feature: OpenPGP Message Encryption
 
+## Implementation Status
+
+All four encryption profiles described below are implemented, including the post-quantum
+composite (ML-KEM-768 + X25519, algorithm ID 35, RFC 9980) — see
+`docs/technical/openpgp-hsm-bridge.md` Section 7 for the implementation detail and the RFC-9980
+test-vector-based correctness proof (no interoperability test is possible for this profile — see
+that section for why). One implementation detail deviates from this spec's original
+`PgpCompositeKeyHandle` sketch (Domain Model Additions below): the actual bridge represents a
+composite recipient with a single `PgpKeyReference`/key handle (the ML-KEM component) and derives
+the second (X25519) component's handle deterministically by naming convention rather than
+carrying an explicit pair type — see `CompositeMlKemKeyMaterial` in the technical doc.
+
 ## Feature Summary
 
 The system encrypts and decrypts OpenPGP messages on behalf of applications that hold no private key material themselves. Every private-key operation — recovering a session key from an encrypted message, deriving a shared secret, or decapsulating a key-encapsulation ciphertext — is delegated to a Hardware Security Module through the abstract Hsm-Primitives bridge; the private key never enters application memory in any form, not even transiently. The feature supports four public-key encryption profiles (classical RSA, native elliptic-curve X25519, classical elliptic-curve ECDH as a fallback, and a post-quantum/classical composite) and two symmetric container profiles (a legacy integrity-protected mode and a modern authenticated-encryption mode), so a single application can address recipients holding keys of different algorithm generations within the same message exchange.
@@ -134,5 +146,5 @@ These rules apply across all use cases in this feature and constrain every use c
 1. Should compression (ZIP/ZLIB) of the literal data packet be applied before encryption, or should the plaintext always be wrapped directly and uncompressed? Standard OpenPGP tooling typically compresses; this PoC's interoperability goal may require matching that behavior.
 2. Should a single encrypted message be allowed to mix recipients across all four algorithm profiles simultaneously (as described in UC-1), or should the first implementation iteration restrict a message to recipients of a single profile for simplicity, expanding later?
 3. Is there any restriction on which symmetric container profile (legacy v1 vs modern v2) may be combined with which public-key encryption profile, or are all sixteen combinations equally valid for this PoC's demonstration purpose? Real-world OpenPGP guidance discourages combining the modern container with keys that predate it, but this PoC's stated goal is to demonstrate the bridge, not to enforce production policy — needs an explicit decision before implementation.
-4. Where should the RFC 3394 AES-Key-Wrap step (wrapping the session key with the ECDH- or composite-derived key-wrapping key) be executed — through the HSM's AES capability using the same single-block composition trick as the legacy CFB container, or locally, given that the key-wrapping key itself is derived from an ephemeral, non-persisted shared secret and is not HSM-protected material in either case?
+4. ~~Where should the RFC 3394 AES-Key-Wrap step...~~ **Resolved during implementation:** through the HSM's AES capability, reusing the same single-block-ECB composition (`HsmAesKeyWrap`) that both the classical ECDH profile and the composite profile now share — consistent with keeping every symmetric primitive routed through the HSM abstraction even where the key material is ephemeral.
 5. How should multiple recipient key handles held by the same caller be resolved if more than one matches a wrapped-session-key packet in a message (e.g. duplicate key material) — first match, or an explicit error?
