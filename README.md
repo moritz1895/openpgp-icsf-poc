@@ -2,15 +2,15 @@
 
 PoC: Erweiterung einer proprietären HSM-Krypto-Bibliothek um OpenPGP.
 
-> **Status:** Im Aufbau. Diese Datei wird nach Abschluss der Implementierung finalisiert (siehe `docs/technical/openpgp-hsm-bridge.md` und die Feature-Specs unter `docs/features/`).
+> **Status:** RSA-, natives ECC- (X25519/Ed25519) und klassisches ECC-Fallback-Profil (NIST P-256/P-384) sind implementiert und per CLI-Demo sowie Interop-Tests gegen unveränderte Bouncy Castle verifiziert. Post-Quantum (ML-KEM-768+X25519, ML-DSA-65+Ed25519, RFC 9980) ist **noch nicht implementiert** — siehe „Bekannte Einschränkungen" unten und `docs/technical/openpgp-hsm-bridge.md`.
 
 ## Idee
 
 Es wird angenommen, dass bereits eine hausinterne Krypto-Bibliothek existiert, die kryptographische Bausteine (z. B. JWE) ausschließlich über eine **proprietäre HSM-Primitives-Schnittstelle** bereitstellt — ein generisches Java-Interface nach Builder-Prinzip, das Ausführungsobjekte zusammenbaut und ausführt. Diese Schnittstelle hat **nichts mit JCE oder PKCS#11 zu tun**. Konkreter Backend-Adapter (außerhalb dieser PoC) ist ICSF/CCA auf z/OS mit Crypto-Express-Hardware.
 
-Diese PoC erweitert die Bibliothek um **OpenPGP** (RFC 4880 / RFC 9580 „Crypto-Refresh" / RFC 9980 Post-Quantum-Erweiterung): Verschlüsseln, Entschlüsseln, Signieren, Verifizieren — für RSA-, native-ECC- (X25519/Ed25519) und Post-Quantum-Profile (ML-KEM-768+X25519, ML-DSA-65+Ed25519) — wobei jede kryptographische Operation über die Hsm-Primitives läuft. [Bouncy Castle](https://www.bouncycastle.org/) wird ausschließlich für das OpenPGP-**Paketformat** genutzt, nicht für die eigentlichen Schlüsseloperationen.
+Diese PoC erweitert die Bibliothek um **OpenPGP** (RFC 4880 / RFC 9580 „Crypto-Refresh"): Verschlüsseln, Entschlüsseln, Signieren, Verifizieren — für RSA-, natives ECC- (X25519/Ed25519) und klassisches ECC-Fallback-Profil (NIST P-256/P-384) — wobei jede kryptographische Operation über die Hsm-Primitives läuft. [Bouncy Castle](https://www.bouncycastle.org/) wird ausschließlich für das OpenPGP-**Paketformat** genutzt, nicht für die eigentlichen Schlüsseloperationen. Die Post-Quantum-Erweiterung (RFC 9980: ML-KEM-768+X25519, ML-DSA-65+Ed25519) ist als nächster Schritt geplant, aber noch nicht umgesetzt (siehe „Bekannte Einschränkungen").
 
-Details und Architektur-Hintergrund: siehe `docs/technical/openpgp-hsm-bridge.md` (folgt).
+Details und Architektur-Hintergrund: siehe [`docs/technical/openpgp-hsm-bridge.md`](docs/technical/openpgp-hsm-bridge.md). Fachliche Spezifikation: [`docs/features/openpgp-encryption.md`](docs/features/openpgp-encryption.md), [`docs/features/openpgp-signing.md`](docs/features/openpgp-signing.md). Architektur-Plan (inkl. CCA/ICSF-Realitätscheck, ECC/PQC-Scope): [`docs/plan.md`](docs/plan.md).
 
 ## Setup
 
@@ -51,3 +51,13 @@ kein Netzwerkzugriff). `src/main/resources/application.yml` deaktiviert lediglic
 Spring-Boot-Banner und den Embedded-Web-Server (`web-application-type: none`), da diese PoC
 keinen HTTP-Port braucht. Die Log-Ausgabe wird über `src/main/resources/log4j2.xml` gesteuert
 (Standard: `INFO` für `ms.rohde.openpgpicsfpoc`, `WARN` für alles andere).
+
+## Bekannte Einschränkungen dieser Iteration
+
+Ausführlich begründet in [`docs/technical/openpgp-hsm-bridge.md`](docs/technical/openpgp-hsm-bridge.md):
+
+- **Post-Quantum (RFC 9980) nicht implementiert.** `bcpg` 1.85 kennt die komposite Paketstrukturen (ML-KEM-768+X25519, ML-DSA-65+Ed25519) noch nicht — das erfordert eigenständig nachgebaute Paketformate und ist als eigene Iteration geplant.
+- **EdDSA/Ed25519-Signaturen sind über den digest-basierten `HsmSignature`-Port nicht interoperabel** mit "Pure EdDSA" externer Tools (RSA und ECDSA sind vollständig interop-getestet, Ed25519 rundläuft nur innerhalb dieser Bridge selbst).
+- **`EphemeralPeerKeyHandles`** ist ein Test-Fixture-Workaround für die fehlende Absenderreferenz beim Entschlüsseln (`OpenPgpDecryptionRequest`), keine produktionsreife Lösung.
+- **X25519-ECDH-Unterstützung auf echtem CCA/ICSF ist unbestätigt** (siehe `docs/plan.md`, Abschnitt „CCA/ICSF-Realitätscheck") — öffentliche IBM-Dokumentation belegt nur EdDSA-Signaturen und klassisches NIST-Kurven-ECDH. Ein echter ICSF-Adapter müsste das vorab klären und ggf. auf klassisches ECDH (RFC 6637) ausweichen.
+- Kein Hsm-Keygen-Port — Schlüssel werden als vorab im HSM vorhandene Key-Handles angenommen; die Demo erzeugt ihre Testschlüssel lokal und registriert sie beim Dummy-Hsm-Adapter.
