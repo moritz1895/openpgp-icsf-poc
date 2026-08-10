@@ -97,6 +97,30 @@ class HsmBackedOpenPgpMessageCodecIntegrationTest {
         assertThat(decrypted).isEqualTo(PLAINTEXT);
     }
 
+    @ParameterizedTest
+    @EnumSource(PgpEncryptionProfile.class)
+    void encryptThenDecrypt_givenCompositeMlKem768X25519Recipient_thenRecoversPlaintext(PgpEncryptionProfile profile)
+            throws Exception {
+        var fixture = new HsmTestFixture();
+        var recipientEcdhKeyPair = PgpTestKeys.generateX25519();
+        var recipientMlKemKeyPair = PgpTestKeys.generateMlKem768();
+        var recipient = fixture.registerCompositeMlKemRecipient(
+                "bob-mlkem768-x25519",
+                recipientEcdhKeyPair,
+                recipientMlKemKeyPair,
+                PgpTestKeys.x25519PublicKey(recipientEcdhKeyPair).encodedKeyMaterial().value(),
+                PgpTestKeys.rawMlKemPublicKey(recipientMlKemKeyPair));
+        var senderKeyPair = PgpTestKeys.generateX25519();
+        var sender = fixture.registerSenderKeyAgreementKey(
+                "alice-mlkem768-x25519", senderKeyPair, PgpTestKeys.x25519PublicKey(senderKeyPair));
+
+        OpenPgpMessage encrypted =
+                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, profile, recipient, sender));
+        ByteSequence decrypted = fixture.codec.decrypt(new OpenPgpDecryptionRequest(encrypted, recipient));
+
+        assertThat(decrypted).isEqualTo(PLAINTEXT);
+    }
+
     @Test
     void decrypt_givenWrongRecipientKey_thenThrowsDecryptionFailedException() throws Exception {
         var fixture = new HsmTestFixture();

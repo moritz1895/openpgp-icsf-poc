@@ -1,9 +1,12 @@
 package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 
 import jakarta.inject.Inject;
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
+import java.lang.reflect.Constructor;
+import java.util.Arrays;
 import java.util.Objects;
 import ms.rohde.hexagonalarch.annotations.InfrastructureServiceAdapter;
 import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
@@ -19,10 +22,15 @@ import ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpSigningRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpVerificationRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryptionExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmSignatureExecutor;
 import org.bouncycastle.bcpg.AEADAlgorithmTags;
+import org.bouncycastle.bcpg.BCPGInputStream;
 import org.bouncycastle.bcpg.BCPGOutputStream;
+import org.bouncycastle.bcpg.InputStreamPacket;
+import org.bouncycastle.bcpg.PacketTags;
+import org.bouncycastle.bcpg.PublicKeyEncSessionPacket;
 import org.bouncycastle.bcpg.SymmetricKeyAlgorithmTags;
 import org.bouncycastle.openpgp.PGPEncryptedDataList;
 import org.bouncycastle.openpgp.PGPException;
@@ -31,6 +39,7 @@ import org.bouncycastle.openpgp.PGPLiteralDataGenerator;
 import org.bouncycastle.openpgp.PGPObjectFactory;
 import org.bouncycastle.openpgp.PGPOnePassSignatureList;
 import org.bouncycastle.openpgp.PGPPublicKeyEncryptedData;
+import org.bouncycastle.openpgp.PGPSessionKeyEncryptedData;
 import org.bouncycastle.openpgp.PGPSignature;
 import org.bouncycastle.openpgp.PGPSignatureGenerator;
 import org.bouncycastle.openpgp.PGPSignatureList;
@@ -49,10 +58,29 @@ import org.bouncycastle.openpgp.operator.bc.BcKeyFingerprintCalculator;
  * Hsm-Executor-Ports (siehe Projektplan, Abschnitt "Kernidee der technischen
  * Loesung").
  *
- * <p><b>Scope dieser Iteration:</b> RSA sowie ECC (natives X25519/Ed25519 nach
- * RFC 9580 und das klassische ECDH/ECDSA-Fallback-Profil nach RFC 6637) -
- * die Post-Quantum-Komposit-Algorithmen (ML-KEM-768+X25519, ML-DSA-65+Ed25519)
- * sind explizit ausserhalb des Scopes (siehe Aufgabenstellung).</p>
+ * <p><b>Scope dieser Iteration:</b> RSA, ECC (natives X25519/Ed25519 nach RFC 9580 und
+ * das klassische ECDH/ECDSA-Fallback-Profil nach RFC 6637) sowie die
+ * Post-Quantum-Komposit-Verschluesselung ML-KEM-768+X25519 nach RFC 9980 - die PQC-Signatur
+ * ML-DSA-65+Ed25519 erfordert v6-Schluessel/-Signaturen und bleibt ausserhalb des Scopes
+ * (siehe Aufgabenstellung).</p>
+ *
+ * <p><b>Entschluesselungs-Sonderfall Algorithmus-ID 35:</b> {@code bcpg-jdk18on} 1.85 kennt
+ * diese Algorithmus-ID nicht - sowohl der lesende Konstruktor von
+ * {@link org.bouncycastle.bcpg.PublicKeyEncSessionPacket} als auch die interne
+ * Paketgruppierung von {@link PGPEncryptedDataList} brechen beim Antreffen eines
+ * entsprechenden PKESK-Pakets mit einer {@code IOException} ab, noch bevor eigener Code
+ * eingreifen koennte - {@link #decrypt(OpenPgpDecryptionRequest)} kann fuer diesen
+ * Algorithmus daher nicht wie fuer alle anderen den generischen {@code PGPObjectFactory}-Pfad
+ * nehmen. Stattdessen parst {@link #decryptComposite(OpenPgpDecryptionRequest)} das
+ * PKESK-Paket manuell (reine Paket-Framing-Logik, siehe {@link HsmCompositeMlKemPkeskCodec})
+ * und erzeugt das fuer die eigentliche SEIPD-Entschluesselung/-Integritaetspruefung
+ * benoetigte {@link PGPSessionKeyEncryptedData} ueber dessen paketsichtbaren Konstruktor
+ * per Reflection (siehe {@link #newSessionKeyEncryptedData(InputStreamPacket)}) - so bleibt
+ * die (nicht triviale) MDC-/AEAD-Verifikationslogik vollstaendig in Bouncy Castle statt in
+ * dieser Bridge dupliziert zu werden. Die Reflection funktioniert ohne
+ * {@code --add-opens}, weil sowohl der gepackte Spring-Boot-Jar (`java -jar`) als auch die
+ * Maven-Surefire-Testausfuehrung {@code bcpg-jdk18on} auf dem Classpath (unbenanntes Modul)
+ * statt auf dem Modulpfad laden - siehe {@code module-info.java} dieses Projekts.</p>
  */
 @InfrastructureServiceAdapter
 public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
@@ -63,6 +91,7 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
     private final HsmRsaEncryptionExecutor rsaExecutor;
     private final HsmAesEncryptionExecutor aesExecutor;
     private final HsmKeyAgreementExecutor keyAgreementExecutor;
+    private final HsmKeyEncapsulationExecutor keyEncapsulationExecutor;
     private final HsmSignatureExecutor signatureExecutor;
 
     @Inject
@@ -70,10 +99,13 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
             HsmRsaEncryptionExecutor rsaExecutor,
             HsmAesEncryptionExecutor aesExecutor,
             HsmKeyAgreementExecutor keyAgreementExecutor,
+            HsmKeyEncapsulationExecutor keyEncapsulationExecutor,
             HsmSignatureExecutor signatureExecutor) {
         this.rsaExecutor = Objects.requireNonNull(rsaExecutor, "rsaExecutor darf nicht null sein");
         this.aesExecutor = Objects.requireNonNull(aesExecutor, "aesExecutor darf nicht null sein");
         this.keyAgreementExecutor = Objects.requireNonNull(keyAgreementExecutor, "keyAgreementExecutor darf nicht null sein");
+        this.keyEncapsulationExecutor =
+                Objects.requireNonNull(keyEncapsulationExecutor, "keyEncapsulationExecutor darf nicht null sein");
         this.signatureExecutor = Objects.requireNonNull(signatureExecutor, "signatureExecutor darf nicht null sein");
     }
 
@@ -126,6 +158,14 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
                     recipientPgpPublicKey, keyAgreementExecutor, aesExecutor, request.recipient(),
                     senderKeyAgreementKey);
         }
+        if (algorithm == PgpPublicKeyAlgorithm.ML_KEM_768_X25519) {
+            var senderKeyAgreementKey = Objects.requireNonNull(
+                    request.senderKeyAgreementKey(),
+                    "senderKeyAgreementKey wird fuer schluesselaustausch-basierte Algorithmen benoetigt");
+            return new HsmCompositeMlKemKeyEncryptionMethodGenerator(
+                    recipientPgpPublicKey, keyAgreementExecutor, keyEncapsulationExecutor, aesExecutor,
+                    request.recipient(), senderKeyAgreementKey);
+        }
         throw new IllegalArgumentException(
                 "Algorithmus " + algorithm + " wird von dieser Bridge nicht fuer Verschluesselung unterstuetzt");
     }
@@ -140,6 +180,9 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
 
     @Override
     public ByteSequence decrypt(OpenPgpDecryptionRequest request) {
+        if (request.recipient().publicKey().algorithm() == PgpPublicKeyAlgorithm.ML_KEM_768_X25519) {
+            return decryptComposite(request);
+        }
         try {
             var factory = new PGPObjectFactory(request.message().encoded().value(), FINGERPRINT_CALCULATOR);
             var encryptedDataList = nextOfType(factory, PGPEncryptedDataList.class, "Keine verschluesselten Daten gefunden");
@@ -188,6 +231,87 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
         }
         throw new IllegalArgumentException(
                 "Algorithmus " + algorithm + " wird von dieser Bridge nicht fuer Entschluesselung unterstuetzt");
+    }
+
+    /**
+     * Entschluesselungspfad fuer das komposite ML-KEM-768+X25519-Verfahren (Algorithmus-ID
+     * 35) - siehe Klassen-JavaDoc, Abschnitt "Entschluesselungs-Sonderfall Algorithmus-ID
+     * 35", fuer die Begruendung, warum dieser Pfad nicht ueber {@code PGPObjectFactory}
+     * laufen kann.
+     */
+    private ByteSequence decryptComposite(OpenPgpDecryptionRequest request) {
+        try {
+            byte[] message = request.message().encoded().value();
+            var leadingPacket = HsmCompositeMlKemPkeskCodec.readPacketHeader(message, 0);
+            if (leadingPacket.tag() != PacketTags.PUBLIC_KEY_ENC_SESSION) {
+                throw new OpenPgpDecryptionFailedException(
+                        "Erwartetes PKESK-Paket nicht gefunden (Paket-Tag " + leadingPacket.tag() + ")");
+            }
+            var pkeskHeader = HsmCompositeMlKemPkeskCodec.parsePkeskBody(leadingPacket.body());
+            if (pkeskHeader.algorithm() != PgpKeyMaterialCodec.COMPOSITE_ML_KEM_768_X25519_ALGORITHM_TAG) {
+                throw new OpenPgpDecryptionFailedException(
+                        "PKESK-Algorithmus " + pkeskHeader.algorithm() + " passt nicht zum erwarteten"
+                                + " Komposit-Algorithmus " + PgpKeyMaterialCodec.COMPOSITE_ML_KEM_768_X25519_ALGORITHM_TAG);
+            }
+            boolean isV3 = pkeskHeader.version() == PublicKeyEncSessionPacket.VERSION_3;
+            var algorithmSpecificData = HsmCompositeMlKemPkeskCodec.decodeAlgorithmSpecificData(
+                    pkeskHeader.algorithmSpecificData(), isV3);
+
+            var decryptorFactory = new HsmCompositeMlKemPublicKeyDataDecryptorFactory(
+                    keyAgreementExecutor, keyEncapsulationExecutor, aesExecutor, request.recipient(),
+                    algorithmSpecificData, isV3);
+
+            byte[] remainder = Arrays.copyOfRange(message, leadingPacket.totalLength(), message.length);
+            var seipdIn = new BCPGInputStream(new ByteArrayInputStream(remainder));
+            var seipdPacket = seipdIn.readPacket();
+            if (!(seipdPacket instanceof InputStreamPacket seipdInputStreamPacket)) {
+                throw new OpenPgpDecryptionFailedException(
+                        "Erwartetes SEIPD-Paket nicht gefunden (Paket-Tag " + seipdPacket.getPacketTag() + ")");
+            }
+
+            var encryptedData = newSessionKeyEncryptedData(seipdInputStreamPacket);
+            // encryptedData.verify() liest intern denselben (internen) Stream weiter, den
+            // getDataStream() zurueckgibt - siehe gleichlautender Hinweis in decrypt() oben.
+            var decryptedStream = encryptedData.getDataStream(decryptorFactory);
+            var innerFactory = new PGPObjectFactory(decryptedStream, FINGERPRINT_CALCULATOR);
+            var literalData = nextOfType(innerFactory, PGPLiteralData.class, "Kein Literal-Data-Paket gefunden");
+            byte[] plaintext = literalData.getInputStream().readAllBytes();
+
+            if (!encryptedData.verify()) {
+                throw new OpenPgpDecryptionFailedException("Integritaetspruefung der Nutzlast fehlgeschlagen");
+            }
+
+            return ByteSequence.of(plaintext);
+        } catch (OpenPgpDecryptionFailedException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new OpenPgpDecryptionFailedException("Entschluesselung fehlgeschlagen", e);
+        }
+    }
+
+    /**
+     * Erzeugt ein {@link PGPSessionKeyEncryptedData} ueber dessen paketsichtbaren (in
+     * {@code org.bouncycastle.openpgp}) Konstruktor per Reflection - der einzige oeffentliche
+     * Konstruktionsweg fuer dieses BC-Objekt fuehrt sonst ausschliesslich ueber
+     * {@link PGPEncryptedDataList}, das fuer Algorithmus-ID 35 nicht verwendet werden kann
+     * (siehe Klassen-JavaDoc). {@link PGPSessionKeyEncryptedData} ist BCs Gegenstueck zu
+     * {@code gpg --override-session-key}: es kapselt exakt die SEIPD-Entschluesselungs- und
+     * Integritaetspruefungslogik (Praefix-Check + MDC-Vergleich fuer v1, Chunk-Verifikation
+     * fuer v2/AEAD), die alle anderen Algorithmen dieser Bridge bereits ueber
+     * {@link PGPPublicKeyEncryptedData} wiederverwenden.
+     */
+    private static PGPSessionKeyEncryptedData newSessionKeyEncryptedData(InputStreamPacket seipdPacket) {
+        try {
+            Constructor<PGPSessionKeyEncryptedData> constructor =
+                    PGPSessionKeyEncryptedData.class.getDeclaredConstructor(InputStreamPacket.class);
+            constructor.setAccessible(true);
+            return constructor.newInstance(seipdPacket);
+        } catch (ReflectiveOperationException e) {
+            throw new OpenPgpDecryptionFailedException(
+                    "PGPSessionKeyEncryptedData konnte nicht reflektiv erzeugt werden - siehe Klassen-JavaDoc von "
+                            + HsmBackedOpenPgpMessageCodec.class.getSimpleName() + " zur Hintergrund-Begruendung",
+                    e);
+        }
     }
 
     @Override
