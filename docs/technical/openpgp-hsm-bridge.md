@@ -253,6 +253,11 @@ dokumentierte Fallback-Empfehlung, im echten Adapter auf klassisches NIST-Kurven
 (Alg-ID 35), die X25519 als klassische Komponente nutzt, und ist damit ein offenes Risiko für
 einen echten ICSF-Adapter, nicht nur für das reine ECC-Profil.
 
+Was diese vier Punkte für einen produktiven Einsatz konkret bedeuten (Aufwand, Reihenfolge,
+Handlungsoptionen), steht gebündelt in `docs/technical/production-readiness.md`. Hintergrund zu
+Post-Quantum-Kryptographie in OpenPGP allgemein (nicht projektspezifisch) steht in
+`docs/technical/pqc-notes.md`.
+
 ## 7. Komposite Post-Quantum-Verschlüsselung (ML-KEM-768+X25519, RFC 9980)
 
 Algorithmus-ID 35 kombiniert ML-KEM-768 (Post-Quantum-KEM, FIPS-203) mit X25519 (klassisches
