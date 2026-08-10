@@ -30,20 +30,26 @@ import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
  * oeffentlichen Punkt selbst ableitet (SHA-256-Hash der rohen Punktbytes) -
  * ein Test-/Demo-Aufbau muss den Sender-Schluessel daher unter genau diesem
  * abgeleiteten Handle zusaetzlich zu seinem eigentlichen Alias im HSM-Schluesselspeicher
- * registrieren (siehe Integrationstests dieser Bridge). Ein echter
- * ICSF-Adapter muesste an dieser Stelle einen aequivalenten
- * Public-Key-Import-Schritt vor der eigentlichen Schluesselaustausch-Operation
- * durchfuehren - diese Einschraenkung ist unter docs/technical zu
- * dokumentieren.</p>
+ * registrieren (siehe Integrationstests dieser Bridge sowie der CLI-Demo-Adapter unter
+ * {@code adapters.inbound.cli}). Ein echter ICSF-Adapter muesste an dieser Stelle einen
+ * aequivalenten Public-Key-Import-Schritt vor der eigentlichen
+ * Schluesselaustausch-Operation durchfuehren - diese Einschraenkung ist unter
+ * docs/technical zu dokumentieren.</p>
+ *
+ * <p>Bewusst {@code public}: sowohl die Testinfrastruktur dieser Bridge (gleiches Paket)
+ * als auch der paketfremde CLI-Demo-Adapter muessen Sender-Schluessel exakt nach dieser
+ * Konvention registrieren, damit der Entschluesselungspfad den passenden Handle wiederfindet
+ * - eine paketinterne Duplikation dieser (sicherheitsrelevanten) Ableitungsregel wuerde ein
+ * Drift-Risiko schaffen.</p>
  */
-final class EphemeralPeerKeyHandles {
+public final class EphemeralPeerKeyHandles {
 
     private static final String DIGEST_ALGORITHM = "SHA-256";
     private static final String HANDLE_PREFIX = "ecdh-peer-";
 
     private EphemeralPeerKeyHandles() {}
 
-    static HsmKeyHandle deriveFrom(byte[] rawPublicKeyMaterial) {
+    public static HsmKeyHandle deriveFrom(byte[] rawPublicKeyMaterial) {
         try {
             var digest = MessageDigest.getInstance(DIGEST_ALGORITHM);
             var hash = digest.digest(rawPublicKeyMaterial);
