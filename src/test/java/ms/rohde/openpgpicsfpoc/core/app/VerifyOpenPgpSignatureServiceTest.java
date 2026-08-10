@@ -36,12 +36,12 @@ class VerifyOpenPgpSignatureServiceTest {
         var signedMessage = new OpenPgpMessage(ByteSequence.of(new byte[] {1, 2}));
         var signerPublicKey = new PgpPublicKey(PgpPublicKeyAlgorithm.EDDSA, ByteSequence.of(new byte[] {3, 4}));
         var command = new VerifyOpenPgpSignatureCommand(signedMessage, signerPublicKey);
-        given(codec.verifySignedMessage(any())).willReturn(true);
+        given(codec.verify(any())).willReturn(true);
 
         assertThat(service.verify(command)).isTrue();
 
         ArgumentCaptor<OpenPgpVerificationRequest> captor = ArgumentCaptor.forClass(OpenPgpVerificationRequest.class);
-        then(codec).should().verifySignedMessage(captor.capture());
+        then(codec).should().verify(captor.capture());
         assertThat(captor.getValue().signedMessage()).isEqualTo(signedMessage);
         assertThat(captor.getValue().signerPublicKey()).isEqualTo(signerPublicKey);
     }
@@ -51,7 +51,7 @@ class VerifyOpenPgpSignatureServiceTest {
         var command = new VerifyOpenPgpSignatureCommand(
                 new OpenPgpMessage(ByteSequence.of(new byte[] {1})),
                 new PgpPublicKey(PgpPublicKeyAlgorithm.RSA, ByteSequence.of(new byte[] {2})));
-        given(codec.verifySignedMessage(any())).willReturn(false);
+        given(codec.verify(any())).willReturn(false);
 
         assertThat(service.verify(command)).isFalse();
     }

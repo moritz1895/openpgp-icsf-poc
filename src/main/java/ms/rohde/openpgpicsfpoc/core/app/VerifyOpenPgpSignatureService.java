@@ -27,7 +27,6 @@ public final class VerifyOpenPgpSignatureService implements VerifyOpenPgpSignatu
     @Override
     public boolean verify(VerifyOpenPgpSignatureCommand command) {
         Objects.requireNonNull(command, "command darf nicht null sein");
-        return codec.verifySignedMessage(
-                new OpenPgpVerificationRequest(command.signedMessage(), command.signerPublicKey()));
+        return codec.verify(new OpenPgpVerificationRequest(command.signedMessage(), command.signerPublicKey()));
     }
 }
