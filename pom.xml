@@ -142,7 +142,15 @@
                 <configuration>
                     <release>${java.version}</release>
                     <compilerArgs>
-                        <arg>-Xlint:all</arg>
+                        <!-- "-requires-automatic" ausgenommen: Spring-Boot-Jars liefern bewusst
+                             kein module-info.class (Automatic-Module-Name statt echtem
+                             JPMS-Modul); seit der CLI-Demo-Adapter (@SpringBootApplication)
+                             requires spring.boot/spring.boot.autoconfigure/spring.context/
+                             spring.beans benoetigt, waere sonst "Warnt vor der Verwendung
+                             automatischer Module in den 'Requires'-Klauseln" unvermeidbar - das
+                             liegt an Springs Paketierung, nicht an eigenem Code, daher gezielt
+                             ausgenommen statt komplett auf -Werror zu verzichten. -->
+                        <arg>-Xlint:all,-requires-automatic</arg>
                         <arg>-Werror</arg>
                     </compilerArgs>
                 </configuration>
@@ -166,13 +174,6 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
-                <configuration>
-                    <!-- Diese Iteration liefert nur core/domain, core/app, ports/ und den
-                         Dummy-Hsm-Adapter aus - der @SpringBootApplication-Hauptklasse
-                         tragende CLI-Demo-Adapter (@DrivingAdapter) folgt erst in einer
-                         Folge-Iteration (siehe Projektplan). Repackage bis dahin ueberspringen. -->
-                    <skip>true</skip>
-                </configuration>
             </plugin>
         </plugins>
     </build>
