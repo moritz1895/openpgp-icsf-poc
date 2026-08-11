@@ -4,6 +4,7 @@ import jakarta.inject.Inject;
 import java.security.GeneralSecurityException;
 import java.util.Objects;
 import javax.crypto.KEM;
+import javax.crypto.SecretKey;
 import ms.rohde.hexagonalarch.annotations.InfrastructureServiceAdapter;
 import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationExecutor;
@@ -55,9 +56,9 @@ public final class DummyHsmKeyEncapsulationExecutor implements HsmKeyEncapsulati
     private HsmKeyEncapsulationResult decapsulate(KEM kem, HsmKeyEncapsulationRequest request)
             throws GeneralSecurityException {
         KEM.Decapsulator decapsulator = kem.newDecapsulator(keyStore.requirePrivateKey(request.keyHandle()));
-        var encapsulatedKey =
+        ByteSequence encapsulatedKey =
                 Objects.requireNonNull(request.encapsulatedKey(), "encapsulatedKey fehlt fuer DECAPSULATE");
-        var sharedSecret = decapsulator.decapsulate(encapsulatedKey.value());
+        SecretKey sharedSecret = decapsulator.decapsulate(encapsulatedKey.value());
         return new HsmKeyEncapsulationResult(ByteSequence.of(sharedSecret.getEncoded()), null);
     }
 }

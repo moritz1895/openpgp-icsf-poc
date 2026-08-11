@@ -64,19 +64,21 @@ final class PgpKeyMaterialCodec {
      */
     static final int COMPOSITE_ML_KEM_768_X25519_ALGORITHM_TAG = 35;
 
-    private static final BcKeyFingerprintCalculator FINGERPRINT_CALCULATOR = new BcKeyFingerprintCalculator();
-
     private PgpKeyMaterialCodec() {}
 
     /**
      * Baut ein Bouncy-Castle-{@link PGPPublicKey} aus dem projekteigenen
      * {@link PgpPublicKey} - reine Paket-Framing-Uebersetzung, keine
-     * kryptographische Operation.
+     * kryptographische Operation. {@code fingerprintCalculator} wird vom Aufrufer
+     * injiziert statt hier lokal instanziiert (siehe
+     * {@code OpenPgpIcsfPocApplication#bcKeyFingerprintCalculator()}) - Bouncy Castle
+     * verlangt ihn fuer {@link PGPPublicKey}, verwendet ihn aber ausschliesslich fuer
+     * die (deterministische, zustandslose) Fingerabdruckberechnung.
      */
-    static PGPPublicKey toPgpPublicKey(PgpPublicKey publicKey) {
+    static PGPPublicKey toPgpPublicKey(PgpPublicKey publicKey, BcKeyFingerprintCalculator fingerprintCalculator) {
         try {
-            var packet = toPublicKeyPacket(publicKey);
-            return new PGPPublicKey(packet, FINGERPRINT_CALCULATOR);
+            PublicKeyPacket packet = toPublicKeyPacket(publicKey);
+            return new PGPPublicKey(packet, fingerprintCalculator);
         } catch (PGPException e) {
             throw new IllegalArgumentException("Ungueltiges oeffentliches Schluesselmaterial: " + e.getMessage(), e);
         }
@@ -93,8 +95,8 @@ final class PgpKeyMaterialCodec {
         return switch (publicKey.algorithm()) {
             case RSA -> rsaKeyFromX509(material);
             case ECDH -> {
-                var curve = curveOid(publicKey.curve());
-                var hashAndSymAlg = classicalEcdhAlgorithmPair(publicKey.curve());
+                ASN1ObjectIdentifier curve = curveOid(publicKey.curve());
+                int[] hashAndSymAlg = classicalEcdhAlgorithmPair(publicKey.curve());
                 yield new ECDHPublicBCPGKey(
                         curve, new BigInteger(1, material), hashAndSymAlg[0], hashAndSymAlg[1]);
             }
@@ -120,8 +122,8 @@ final class PgpKeyMaterialCodec {
 
     private static RSAPublicBCPGKey rsaKeyFromX509(byte[] x509EncodedSubjectPublicKeyInfo) {
         try {
-            var keyFactory = KeyFactory.getInstance("RSA");
-            var publicKey =
+            KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+            RSAPublicKey publicKey =
                     (RSAPublicKey) keyFactory.generatePublic(new X509EncodedKeySpec(x509EncodedSubjectPublicKeyInfo));
             return new RSAPublicBCPGKey(publicKey.getModulus(), publicKey.getPublicExponent());
         } catch (GeneralSecurityException e) {

@@ -42,7 +42,7 @@ final class HsmCompositeMlKemKeyCombiner {
 
     static byte[] multiKeyCombine(
             byte[] mlkemKeyShare, byte[] ecdhKeyShare, byte[] ecdhCipherText, byte[] ecdhPublicKey, byte algId) {
-        var input = new ByteArrayOutputStream();
+        ByteArrayOutputStream input = new ByteArrayOutputStream();
         input.writeBytes(mlkemKeyShare);
         input.writeBytes(ecdhKeyShare);
         input.writeBytes(ecdhCipherText);

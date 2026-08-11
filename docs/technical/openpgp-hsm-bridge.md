@@ -65,11 +65,11 @@ Alle fünf Ports unter `ports/outbound/hsm/` folgen demselben dreiteiligen Muste
    `execute(Request)`-Methode. Nur dieses Interface wird von einem Adapter implementiert
    (produktiv: ICSF-Adapter, in dieser PoC: `adapters/outbound/hsm/dummy`).
 
-Typischer Aufruf aus einer Bridge-Klasse (`HsmCfbEngine`):
+Typischer Aufruf aus einer Bridge-Klasse (`HsmAesKeyWrap`, ein einzelner RFC-3394-Blockschritt):
 
 ```java
-var request = HsmAesEncryption.builder()
-        .sessionKey(ByteSequence.of(sessionKey))
+HsmAesEncryptionRequest request = HsmAesEncryption.builder()
+        .sessionKey(ByteSequence.of(kek))
         .cipherMode(HsmAesCipherMode.ECB)
         .operation(HsmCipherOperation.ENCRYPT)
         .input(ByteSequence.of(block))
@@ -82,7 +82,7 @@ Die fünf Ports und ihre Verwendung in der Bridge:
 | Port | Zweck | Verwendet von |
 |---|---|---|
 | `HsmRsaEncryption` / `HsmRsaEncryptionExecutor` | RSA-PKCS#1v1.5, ein Klartextblock rein/raus | `HsmRsaPublicKeyKeyEncryptionMethodGenerator` (PKESK bauen), `HsmRsaPublicKeyDataDecryptorFactory` (Sitzungsschlüssel wiederherstellen) |
-| `HsmAesEncryption` / `HsmAesEncryptionExecutor` | AES in einem von vier Modi (`ECB`/`CBC`/`CFB`/`GCM`), Sitzungsschlüssel als Klartextwert (kein Handle, siehe Abschnitt 4) | `HsmCfbEngine` (ECB als CFB-Baustein), `HsmAeadChunkCodec` (GCM), `HsmAesKeyWrap` (ECB als RFC-3394-Baustein) |
+| `HsmAesEncryption` / `HsmAesEncryptionExecutor` | AES in einem von vier Modi (`ECB`/`CBC`/`CFB`/`GCM`), Sitzungsschlüssel als Klartextwert (kein Handle, siehe Abschnitt 4) | `HsmAeadChunkCodec` (GCM), `HsmAesKeyWrap` (ECB als RFC-3394-Baustein) |
 | `HsmSignature` / `HsmSignatureExecutor` | Ein Algorithmus-Port für RSA/ECDSA/EdDSA/ML-DSA, operiert immer auf einem vorab lokal berechneten Digest | `HsmBackedPGPContentSignerBuilder` |
 | `HsmKeyAgreement` / `HsmKeyAgreementExecutor` | ECDH-Punktmultiplikation, kurvenparametrisiert (`X25519`/`P256`/`P384`), lokaler Handle × Peer-Handle → Shared Secret | `HsmEcdhPublicKeyKeyEncryptionMethodGenerator`, `HsmEcdhPublicKeyDataDecryptorFactory` |
 | `HsmKeyEncapsulation` / `HsmKeyEncapsulationExecutor` | ML-KEM-768 Encapsulate/Decapsulate | `HsmCompositeMlKemKeyEncryptionMethodGenerator`, `HsmCompositeMlKemPublicKeyDataDecryptorFactory` (siehe Abschnitt 7) |
@@ -100,54 +100,33 @@ Hsm-Keygen-Port) und ohnehin sofort für Empfänger verpackt wird. Entspricht de
 "Clear-Key"-Modus realer symmetrischer HSM-Verben (z. B. CCA Symmetric Key Encipher/Decipher
 mit Klartextschlüssel) im Gegensatz zu deren "Secure-Key"-Varianten.
 
-## 3. Die beiden SEIPD-Profile
+## 3. Das SEIPD-v2/AEAD-Profil
 
-`HsmBackedPGPDataEncryptorBuilder` implementiert `PGPDataEncryptorBuilder` und bildet **beide**
-Verschlüsselungsprofile über denselben `HsmAesEncryption`-Cipher-Mode-Setter ab. Welches Profil
-verwendet wird, entscheidet `HsmBackedOpenPgpMessageCodec.encrypt(...)` anhand von
-`PgpEncryptionProfile`:
+`HsmBackedPGPDataEncryptorBuilder` implementiert `PGPDataEncryptorBuilder` und bildet
+ausschließlich SEIPD v2/AEAD (RFC 9580) über den `HsmAesEncryption`-Cipher-Mode-Setter ab.
+`HsmBackedOpenPgpMessageCodec.encrypt(...)` konfiguriert dafür immer denselben AEAD-Modus:
 
 ```java
-if (request.profile() == PgpEncryptionProfile.AEAD_V2) {
-    dataEncryptorBuilder.setWithAEAD(AEADAlgorithmTags.GCM, AEAD_CHUNK_SIZE_EXPONENT);
-    dataEncryptorBuilder.setUseV6AEAD();
-} else {
-    dataEncryptorBuilder.setWithIntegrityPacket(true);
-}
+dataEncryptorBuilder.setWithAEAD(AEADAlgorithmTags.GCM, AEAD_CHUNK_SIZE_EXPONENT);
+dataEncryptorBuilder.setUseV6AEAD();
 ```
 
-### 3.1 Legacy-Profil (SEIPD v1, RFC 4880, CFB + MDC)
-
-`build(byte[] keyBytes)` liefert einen `PGPDataEncryptor`, dessen Output-Stream Plain-CFB mit
-Null-IV verwendet:
-
-- `HsmCfbEngine` hält ein 16-Byte-Rückkopplungsregister und ruft für jeden Block
-  `HsmAesEncryptionExecutor` mit `cipherMode(ECB)` auf genau diesem Register auf (nie auf dem
-  Klartext/Chiffretext selbst) — das Ergebnis ist der Keystream, der per XOR mit dem
-  Klartextblock verknüpft wird. Sowohl beim Ver- als auch beim Entschlüsseln wird die
-  Blockchiffre im **Verschlüsselungsmodus** aufgerufen (Eigenschaft von CFB als
-  selbstsynchronisierendem Modus) — daher ausschließlich `HsmCipherOperation.ENCRYPT`-Aufrufe
-  gegen die HSM, auch beim Entschlüsseln der Nachricht.
-- `HsmCfbOutputStream`/`HsmCfbInputStream` puffern beliebig große `write()`/`read()`-Aufrufe zu
-  16-Byte-Fenstern und delegieren jedes volle (bzw. das letzte, unvollständige) Fenster an die
-  Engine.
-- Der MDC-Trailer (SHA-1 über den Klartext) wird lokal über `LocalSha1DigestCalculator`
-  gebildet — reine Integritätssicherung ohne Geheimnisbezug, kein HSM-Aufruf nötig.
-
-**Beim Bau entdeckte Erkenntnis** (dokumentiert im JavaDoc von `HsmCfbEngine`): Bouncy Castles
-eigene Referenzimplementierung verwendet für SEIPD v1 (mit MDC) **keine** spezielle
-"OpenPGP-CFB-mit-Resync"-Konstruktion. Die dortige `OpenPGPCFBBlockCipher`-Klasse mit
-Resync-Logik wird nur für das ältere, MDC-lose SED-Paketformat gebraucht, das nicht Teil dieses
-Scopes ist. SEIPD v1 nutzt stattdessen gewöhnliches CFB mit voller Blockrückkopplung und einem
-Null-IV (`new ParametersWithIV(key, new byte[blockSize])`). Diese Bridge bildet also bewusst
-*keinen* Resync nach — das wäre für SEIPD v1 schlicht falsch gewesen.
-
-### 3.2 Modernes Profil (SEIPD v2/AEAD, RFC 9580, AES-256-GCM)
+**Warum kein SEIPD v1 (RFC 4880, Plain-CFB + MDC)?** Frühere Iterationen dieser Bridge
+unterstützten beide Profile parallel (Plain-CFB mit Null-IV über ein HSM-ECB-Rückkopplungsregister,
+MDC-Trailer lokal per SHA-1). Ein Review der Implementierung kam zu dem Schluss, dass ein
+zusätzliches, kryptographisch schwächeres Profil ohne fachlichen Mehrwert für diese PoC nur
+unnötigen Implementierungs- und Pflegeaufwand bedeutet hätte — das Profil wurde daraufhin bewusst
+entfernt. `HsmBackedPGPDataEncryptorBuilder.build(byte[])` (die von Bouncy Castle nur für dieses
+Profil aufgerufene Methode) sowie die entsprechenden `createDataDecryptor(boolean, int, byte[])`-
+Überladungen aller `PublicKeyDataDecryptorFactory`-Implementierungen dieser Bridge werfen daher
+explizit eine `PGPException`, statt das Profil stillschweigend zu unterstützen.
 
 `build(byte[] key, byte[] salt)` leitet zunächst lokal per HKDF-SHA256 (RFC 9580 Section
-5.13.2) aus Sitzungsschlüssel und Salt den Nachrichtenschlüssel und das 12-Byte-Nonce-Präfix ab
-(`Rfc6637KeyDerivation.aeadMessageKeyAndIvMaterial`, trotz des Klassennamens auch für das
-AEAD-Profil zuständig). Die eigentliche Verschlüsselung läuft Chunk-weise:
+5.13.2, über Bouncy Castles eigenen `HKDFBytesGenerator` statt einer selbst geschriebenen
+Extract-and-Expand-Schleife) aus Sitzungsschlüssel und Salt den Nachrichtenschlüssel und das
+12-Byte-Nonce-Präfix ab (`Rfc6637KeyDerivation.aeadMessageKeyAndIvMaterial`, trotz des
+Klassennamens auch für das AEAD-Profil zuständig). Die eigentliche Verschlüsselung läuft
+Chunk-weise:
 
 - `HsmAeadOutputStream` puffert Klartext bis zur konfigurierten Chunk-Größe (Exponent `12` →
   4096-Byte-Chunks) und verschlüsselt jeden vollen Chunk sofort.
@@ -161,12 +140,17 @@ AEAD-Profil zuständig). Die eigentliche Verschlüsselung läuft Chunk-weise:
   lehnen das ab.
 
 Entschlüsselung läuft spiegelbildlich über `HsmSymmetricDecryptorSupport.createAeadDecryptor`
-und `HsmAeadChunkCodec.decryptChunk`/`verifyFinalTag`.
+und `HsmAeadChunkCodec.decryptChunk`/`verifyFinalTag`. Anders als ein Klartext-Stream kann die
+AEAD-Nutzlast beim Entschlüsseln nicht Chunk-für-Chunk an den Aufrufer durchgereicht werden,
+bevor der abschließende Nachrichten-Tag geprüft ist — sonst könnte ein Angreifer die Nachricht
+unbemerkt kürzen (Truncation-Angriff). `createAeadDecryptor` liest daher den kompletten
+Ciphertext vorab ein, entschlüsselt und verifiziert alle Chunks samt Nachrichten-Tag, und liefert
+erst danach den fertigen Klartext zurück.
 
-Beide Profile teilen sich denselben `HsmAesEncryptionExecutor`-Port — nur `cipherMode` und die
-umgebende Framing-Logik unterscheiden sich. Das demonstriert, dass beliebige symmetrische
-Betriebsmodi über eine einzige, algorithmusagnostische Hsm-Primitive abbildbar sind, solange
-diese einen Cipher-Mode-Setter besitzt (siehe Projektkontext).
+Denselben `HsmAesEncryptionExecutor`-Port nutzt auch `HsmAesKeyWrap` (RFC-3394-Schlüsselverpackung,
+`cipherMode(ECB)`) — nur `cipherMode` und die umgebende Framing-Logik unterscheiden sich. Das
+demonstriert, dass beliebige symmetrische Betriebsmodi über eine einzige, algorithmusagnostische
+Hsm-Primitive abbildbar sind, solange diese einen Cipher-Mode-Setter besitzt (siehe Projektkontext).
 
 ## 4. Schlüssel-Handle-Modellierung: kein `PGPSecretKey` mit echtem Material
 
@@ -174,7 +158,12 @@ Diese Bridge erzeugt und liest **niemals** ein `PGPSecretKey`-Objekt mit echtem 
 Schlüsselmaterial. Stattdessen:
 
 - `PgpKeyMaterialCodec.toPgpPublicKey(...)` baut aus dem projekteigenen `PgpPublicKey` ein
-  `org.bouncycastle.openpgp.PGPPublicKey` — reine Paket-Framing-Übersetzung.
+  `org.bouncycastle.openpgp.PGPPublicKey` — reine Paket-Framing-Übersetzung. Den dafür
+  benötigten `BcKeyFingerprintCalculator` reicht der Aufrufer als Parameter durch, statt ihn
+  lokal zu instanziieren — `OpenPgpIcsfPocApplication.bcKeyFingerprintCalculator()` stellt ihn
+  als einzige, injizierte Instanz bereit (analog zur `InMemoryHsmKeyStore`-Bean-Definition
+  daneben), statt dass mehrere Klassen redundant je eine eigene, versteckt gekoppelte Instanz
+  anlegen.
 - Für den Signaturschritt verlangt BCs `PGPSignatureGenerator.init(...)` aus API-Gründen ein
   `PGPPrivateKey`-Objekt. `PgpKeyMaterialCodec.placeholderPrivateKey(...)` baut dafür einen
   **opaken Platzhalter**: ein `PGPPrivateKey`, dessen `BCPGKey` (`NoMaterialBcpgKey`) keine
@@ -291,8 +280,8 @@ PKESK-Paket mit Algorithmus-ID 35 grundsätzlich nicht einlesen (siehe oben), so
 für die gesamte Nachricht versperrt ist, nicht nur für das PKESK-Paket selbst. Der Codec parst
 das PKESK-Paket deshalb manuell (siehe 7.3) und erzeugt anschließend ein
 `org.bouncycastle.openpgp.PGPSessionKeyEncryptedData` — BCs Gegenstück zu
-`gpg --override-session-key`, das die SEIPD-Entschlüsselungs-/Integritätsprüfungslogik (v1:
-Präfix-Quick-Check + MDC-Vergleich, v2: Chunk-Verifikation) fertig mitbringt — über dessen
+`gpg --override-session-key`, das die SEIPD-v2/AEAD-Entschlüsselungs-/Chunk-Verifikationslogik
+fertig mitbringt — über dessen
 paketsichtbaren Konstruktor per Reflection (`HsmBackedOpenPgpMessageCodec.newSessionKeyEncryptedData(...)`).
 Das funktioniert ohne `--add-opens`, weil sowohl der gepackte Spring-Boot-Jar (`java -jar`) als
 auch die Maven-Surefire-Testausführung `bcpg-jdk18on` auf dem Classpath (unbenanntes Modul) statt

@@ -12,6 +12,7 @@ import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKey;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKeyAlgorithm;
+import org.bouncycastle.openpgp.operator.bc.BcKeyFingerprintCalculator;
 
 /**
  * Verdrahtet die Dummy-Hsm-Adapter (Test-Doubles fuer den spaeteren
@@ -29,7 +30,8 @@ final class HsmTestFixture {
     final DummyHsmKeyEncapsulationExecutor keyEncapsulationExecutor = new DummyHsmKeyEncapsulationExecutor(keyStore);
     final DummyHsmSignatureExecutor signatureExecutor = new DummyHsmSignatureExecutor(keyStore);
     final HsmBackedOpenPgpMessageCodec codec = new HsmBackedOpenPgpMessageCodec(
-            rsaExecutor, aesExecutor, keyAgreementExecutor, keyEncapsulationExecutor, signatureExecutor);
+            rsaExecutor, aesExecutor, keyAgreementExecutor, keyEncapsulationExecutor, signatureExecutor,
+            new BcKeyFingerprintCalculator());
 
     PgpKeyReference registerRecipient(String alias, KeyPair keyPair, PgpPublicKey publicKey) {
         var handle = new HsmKeyHandle(alias);

@@ -6,8 +6,10 @@ import java.util.Objects;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKeyAlgorithm;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmEllipticCurve;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreement;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementRequest;
 import org.bouncycastle.bcpg.ECDHPublicBCPGKey;
 import org.bouncycastle.bcpg.MPInteger;
 import org.bouncycastle.openpgp.PGPException;
@@ -55,12 +57,12 @@ final class HsmEcdhPublicKeyKeyEncryptionMethodGenerator extends PublicKeyKeyEnc
     @Override
     protected byte[] encryptSessionInfo(PGPPublicKey pubKey, byte[] sessionKey, byte symAlgId, boolean isV3)
             throws PGPException {
-        var algorithm = recipient.publicKey().algorithm();
-        var curve = algorithm == PgpPublicKeyAlgorithm.X25519
-                ? ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmEllipticCurve.X25519
+        PgpPublicKeyAlgorithm algorithm = recipient.publicKey().algorithm();
+        HsmEllipticCurve curve = algorithm == PgpPublicKeyAlgorithm.X25519
+                ? HsmEllipticCurve.X25519
                 : PgpKeyMaterialCodec.toHsmCurve(recipient.publicKey().curve());
 
-        var sharedSecretRequest = HsmKeyAgreement.builder()
+        HsmKeyAgreementRequest sharedSecretRequest = HsmKeyAgreement.builder()
                 .curve(curve)
                 .localKeyHandle(senderKeyAgreementKey.keyHandle())
                 .peerKeyHandle(recipient.keyHandle())
@@ -87,7 +89,7 @@ final class HsmEcdhPublicKeyKeyEncryptionMethodGenerator extends PublicKeyKeyEnc
             PGPPublicKey pubKey, byte[] sessionKey, byte symAlgId, boolean isV3, byte[] sharedSecret,
             byte[] senderPublicKeyMaterial)
             throws PGPException {
-        var ecKey = (ECDHPublicBCPGKey) pubKey.getPublicKeyPacket().getKey();
+        ECDHPublicBCPGKey ecKey = (ECDHPublicBCPGKey) pubKey.getPublicKeyPacket().getKey();
         try {
             byte[] userKeyingMaterial = Rfc6637KeyDerivation.classicalUserKeyingMaterial(
                     ecKey.getCurveOID().getEncoded(), ecKey.getHashAlgorithm(), ecKey.getSymmetricKeyAlgorithm(),

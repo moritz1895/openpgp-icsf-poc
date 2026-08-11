@@ -2,14 +2,17 @@ package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 
 import java.util.Objects;
 import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
+import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmEllipticCurve;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreement;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulation;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationOperation;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationRequest;
 import org.bouncycastle.bcpg.AEADEncDataPacket;
 import org.bouncycastle.bcpg.SymmetricEncIntegrityPacket;
 import org.bouncycastle.bcpg.SymmetricKeyAlgorithmTags;
@@ -28,8 +31,7 @@ import org.bouncycastle.openpgp.operator.SessionKeyDataDecryptorFactory;
  * (wie {@link HsmEcdhPublicKeyDataDecryptorFactory}/{@link HsmRsaPublicKeyDataDecryptorFactory})?</b>
  * Beide Wege fuehren letztlich zu einem BC-{@code PGPEncryptedData}-Objekt, dessen
  * {@code getDataStream(...)} die eigentliche symmetrische Entschluesselung samt
- * Integritaetspruefung uebernimmt (Praefix-Pruefung + MDC-Vergleich fuer SEIPD v1,
- * Chunk-Verifikation fuer SEIPD v2/AEAD) - Logik, die diese Bridge bewusst nicht
+ * Chunk-Verifikation fuer SEIPD v2/AEAD uebernimmt - Logik, die diese Bridge bewusst nicht
  * dupliziert (siehe {@link HsmBackedOpenPgpMessageCodec} fuer die Begruendung, warum
  * dieses Objekt fuer Algorithmus-ID 35 nicht ueber {@code PGPObjectFactory}, sondern nur
  * manuell erzeugt werden kann). Der Sitzungsschluessel wird hier jedoch bereits <b>vor</b>
@@ -59,16 +61,16 @@ final class HsmCompositeMlKemPublicKeyDataDecryptorFactory implements SessionKey
         Objects.requireNonNull(recipient, "recipient darf nicht null sein");
         Objects.requireNonNull(algorithmSpecificData, "algorithmSpecificData darf nicht null sein");
 
-        var recipientEcdhSubKeyHandle = CompositeMlKemKeyMaterial.ecdhSubKeyHandle(recipient.keyHandle());
-        var senderEphemeralPeerHandle = EphemeralPeerKeyHandles.deriveFrom(algorithmSpecificData.ecdhCipherText());
-        var agreementRequest = HsmKeyAgreement.builder()
+        HsmKeyHandle recipientEcdhSubKeyHandle = CompositeMlKemKeyMaterial.ecdhSubKeyHandle(recipient.keyHandle());
+        HsmKeyHandle senderEphemeralPeerHandle = EphemeralPeerKeyHandles.deriveFrom(algorithmSpecificData.ecdhCipherText());
+        HsmKeyAgreementRequest agreementRequest = HsmKeyAgreement.builder()
                 .curve(HsmEllipticCurve.X25519)
                 .localKeyHandle(recipientEcdhSubKeyHandle)
                 .peerKeyHandle(senderEphemeralPeerHandle)
                 .build();
         byte[] ecdhKeyShare = keyAgreementExecutor.execute(agreementRequest).sharedSecret().value();
 
-        var encapsulationRequest = HsmKeyEncapsulation.builder()
+        HsmKeyEncapsulationRequest encapsulationRequest = HsmKeyEncapsulation.builder()
                 .keyHandle(recipient.keyHandle())
                 .operation(HsmKeyEncapsulationOperation.DECAPSULATE)
                 .encapsulatedKey(ByteSequence.of(algorithmSpecificData.mlkemCipherText()))
@@ -116,8 +118,10 @@ final class HsmCompositeMlKemPublicKeyDataDecryptorFactory implements SessionKey
     }
 
     @Override
-    public PGPDataDecryptor createDataDecryptor(boolean withIntegrityPacket, int encAlgorithm, byte[] key) {
-        return HsmSymmetricDecryptorSupport.createCfbDecryptor(aesExecutor, key);
+    public PGPDataDecryptor createDataDecryptor(boolean withIntegrityPacket, int encAlgorithm, byte[] key) throws PGPException {
+        throw new PGPException(
+                "SEIPD v1 (Plain-CFB+MDC) wird von dieser PoC nicht unterstuetzt (siehe "
+                        + "Feature-Spezifikation: nur SEIPD v2/AEAD)");
     }
 
     @Override
@@ -125,7 +129,7 @@ final class HsmCompositeMlKemPublicKeyDataDecryptorFactory implements SessionKey
             throws PGPException {
         throw new PGPException(
                 "Legacy-v5-Style-AEAD (LibrePGP/OCB) ist ausserhalb des Scopes dieser PoC (siehe "
-                        + "Feature-Spezifikation: nur SEIPD v1 und SEIPD v2/AEAD)");
+                        + "Feature-Spezifikation: nur SEIPD v2/AEAD)");
     }
 
     @Override

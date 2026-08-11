@@ -6,6 +6,7 @@ import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmCipherOperation;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryption;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryptionExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryptionRequest;
 import org.bouncycastle.openpgp.PGPException;
 import org.bouncycastle.openpgp.PGPPublicKey;
 import org.bouncycastle.openpgp.operator.PublicKeyKeyEncryptionMethodGenerator;
@@ -34,7 +35,7 @@ final class HsmRsaPublicKeyKeyEncryptionMethodGenerator extends PublicKeyKeyEncr
     protected byte[] encryptSessionInfo(PGPPublicKey pubKey, byte[] sessionKey, byte symAlgId, boolean isV3)
             throws PGPException {
         byte[] sessionInfo = createSessionInfo(isV3 ? symAlgId : (byte) 0, sessionKey);
-        var request = HsmRsaEncryption.builder()
+        HsmRsaEncryptionRequest request = HsmRsaEncryption.builder()
                 .keyHandle(recipientKeyHandle)
                 .operation(HsmCipherOperation.ENCRYPT)
                 .input(ByteSequence.of(sessionInfo))

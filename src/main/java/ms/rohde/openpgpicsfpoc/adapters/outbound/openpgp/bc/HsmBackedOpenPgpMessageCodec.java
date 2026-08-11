@@ -4,6 +4,7 @@ import jakarta.inject.Inject;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Constructor;
 import java.util.Arrays;
@@ -11,7 +12,6 @@ import java.util.Objects;
 import ms.rohde.hexagonalarch.annotations.InfrastructureServiceAdapter;
 import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
 import ms.rohde.openpgpicsfpoc.core.domain.OpenPgpMessage;
-import ms.rohde.openpgpicsfpoc.core.domain.PgpEncryptionProfile;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKey;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKeyAlgorithm;
@@ -29,15 +29,20 @@ import org.bouncycastle.bcpg.AEADAlgorithmTags;
 import org.bouncycastle.bcpg.BCPGInputStream;
 import org.bouncycastle.bcpg.BCPGOutputStream;
 import org.bouncycastle.bcpg.InputStreamPacket;
+import org.bouncycastle.bcpg.Packet;
 import org.bouncycastle.bcpg.PacketTags;
 import org.bouncycastle.bcpg.PublicKeyEncSessionPacket;
 import org.bouncycastle.bcpg.SymmetricKeyAlgorithmTags;
+import org.bouncycastle.openpgp.PGPEncryptedData;
+import org.bouncycastle.openpgp.PGPEncryptedDataGenerator;
 import org.bouncycastle.openpgp.PGPEncryptedDataList;
 import org.bouncycastle.openpgp.PGPException;
 import org.bouncycastle.openpgp.PGPLiteralData;
 import org.bouncycastle.openpgp.PGPLiteralDataGenerator;
 import org.bouncycastle.openpgp.PGPObjectFactory;
 import org.bouncycastle.openpgp.PGPOnePassSignatureList;
+import org.bouncycastle.openpgp.PGPPrivateKey;
+import org.bouncycastle.openpgp.PGPPublicKey;
 import org.bouncycastle.openpgp.PGPPublicKeyEncryptedData;
 import org.bouncycastle.openpgp.PGPSessionKeyEncryptedData;
 import org.bouncycastle.openpgp.PGPSignature;
@@ -52,7 +57,7 @@ import org.bouncycastle.openpgp.operator.bc.BcKeyFingerprintCalculator;
  * die einzelnen Bridge-Klassen dieses Pakets zu vollstaendigen
  * {@code encrypt}/{@code decrypt}/{@code sign}/{@code verify}-Ablaeufen
  * zusammen. Bouncy Castle wird ausschliesslich fuer Paket-Framing und
- * Orchestrierung genutzt ({@link org.bouncycastle.openpgp.PGPEncryptedDataGenerator},
+ * Orchestrierung genutzt ({@link PGPEncryptedDataGenerator},
  * {@link PGPSignatureGenerator}, {@link PGPObjectFactory}, ...) - jede
  * tatsaechliche kryptographische Operation laeuft ueber die injizierten
  * Hsm-Executor-Ports (siehe Projektplan, Abschnitt "Kernidee der technischen
@@ -86,13 +91,13 @@ import org.bouncycastle.openpgp.operator.bc.BcKeyFingerprintCalculator;
 public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
 
     private static final int AEAD_CHUNK_SIZE_EXPONENT = 12; // 4096-Byte-Chunks
-    private static final BcKeyFingerprintCalculator FINGERPRINT_CALCULATOR = new BcKeyFingerprintCalculator();
 
     private final HsmRsaEncryptionExecutor rsaExecutor;
     private final HsmAesEncryptionExecutor aesExecutor;
     private final HsmKeyAgreementExecutor keyAgreementExecutor;
     private final HsmKeyEncapsulationExecutor keyEncapsulationExecutor;
     private final HsmSignatureExecutor signatureExecutor;
+    private final BcKeyFingerprintCalculator fingerprintCalculator;
 
     @Inject
     public HsmBackedOpenPgpMessageCodec(
@@ -100,34 +105,33 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
             HsmAesEncryptionExecutor aesExecutor,
             HsmKeyAgreementExecutor keyAgreementExecutor,
             HsmKeyEncapsulationExecutor keyEncapsulationExecutor,
-            HsmSignatureExecutor signatureExecutor) {
+            HsmSignatureExecutor signatureExecutor,
+            BcKeyFingerprintCalculator fingerprintCalculator) {
         this.rsaExecutor = Objects.requireNonNull(rsaExecutor, "rsaExecutor darf nicht null sein");
         this.aesExecutor = Objects.requireNonNull(aesExecutor, "aesExecutor darf nicht null sein");
         this.keyAgreementExecutor = Objects.requireNonNull(keyAgreementExecutor, "keyAgreementExecutor darf nicht null sein");
         this.keyEncapsulationExecutor =
                 Objects.requireNonNull(keyEncapsulationExecutor, "keyEncapsulationExecutor darf nicht null sein");
         this.signatureExecutor = Objects.requireNonNull(signatureExecutor, "signatureExecutor darf nicht null sein");
+        this.fingerprintCalculator = Objects.requireNonNull(fingerprintCalculator, "fingerprintCalculator darf nicht null sein");
     }
 
     @Override
     public OpenPgpMessage encrypt(OpenPgpEncryptionRequest request) {
         try {
-            var recipientPublicKey = request.recipient().publicKey();
-            var recipientPgpPublicKey = PgpKeyMaterialCodec.toPgpPublicKey(recipientPublicKey);
+            PgpPublicKey recipientPublicKey = request.recipient().publicKey();
+            PGPPublicKey recipientPgpPublicKey = PgpKeyMaterialCodec.toPgpPublicKey(recipientPublicKey, fingerprintCalculator);
 
-            var dataEncryptorBuilder = new HsmBackedPGPDataEncryptorBuilder(SymmetricKeyAlgorithmTags.AES_256, aesExecutor);
-            if (request.profile() == PgpEncryptionProfile.AEAD_V2) {
-                dataEncryptorBuilder.setWithAEAD(AEADAlgorithmTags.GCM, AEAD_CHUNK_SIZE_EXPONENT);
-                dataEncryptorBuilder.setUseV6AEAD();
-            } else {
-                dataEncryptorBuilder.setWithIntegrityPacket(true);
-            }
+            HsmBackedPGPDataEncryptorBuilder dataEncryptorBuilder =
+                    new HsmBackedPGPDataEncryptorBuilder(SymmetricKeyAlgorithmTags.AES_256, aesExecutor);
+            dataEncryptorBuilder.setWithAEAD(AEADAlgorithmTags.GCM, AEAD_CHUNK_SIZE_EXPONENT);
+            dataEncryptorBuilder.setUseV6AEAD();
 
-            var generator = new org.bouncycastle.openpgp.PGPEncryptedDataGenerator(dataEncryptorBuilder);
+            PGPEncryptedDataGenerator generator = new PGPEncryptedDataGenerator(dataEncryptorBuilder);
             generator.addMethod(methodGeneratorFor(recipientPublicKey, recipientPgpPublicKey, request));
 
             byte[] plaintext = request.plaintext().value();
-            var outputBytes = new ByteArrayOutputStream();
+            ByteArrayOutputStream outputBytes = new ByteArrayOutputStream();
             // Partial-Body-Length-Modus (statt fester Laenge): der ueber diesen Stream
             // geschriebene Byteumfang ist die Groesse des GESAMTEN Literal-Data-Pakets
             // (Paket-Header + Inhalt), nicht nur die des rohen Klartexts - im
@@ -142,16 +146,14 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
     }
 
     private PGPKeyEncryptionMethodGenerator methodGeneratorFor(
-            PgpPublicKey recipientPublicKey,
-            org.bouncycastle.openpgp.PGPPublicKey recipientPgpPublicKey,
-            OpenPgpEncryptionRequest request) {
-        var algorithm = recipientPublicKey.algorithm();
+            PgpPublicKey recipientPublicKey, PGPPublicKey recipientPgpPublicKey, OpenPgpEncryptionRequest request) {
+        PgpPublicKeyAlgorithm algorithm = recipientPublicKey.algorithm();
         if (algorithm == PgpPublicKeyAlgorithm.RSA) {
             return new HsmRsaPublicKeyKeyEncryptionMethodGenerator(
                     recipientPgpPublicKey, rsaExecutor, request.recipient().keyHandle());
         }
         if (algorithm == PgpPublicKeyAlgorithm.X25519 || algorithm == PgpPublicKeyAlgorithm.ECDH) {
-            var senderKeyAgreementKey = Objects.requireNonNull(
+            PgpKeyReference senderKeyAgreementKey = Objects.requireNonNull(
                     request.senderKeyAgreementKey(),
                     "senderKeyAgreementKey wird fuer schluesselaustausch-basierte Algorithmen benoetigt");
             return new HsmEcdhPublicKeyKeyEncryptionMethodGenerator(
@@ -159,7 +161,7 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
                     senderKeyAgreementKey);
         }
         if (algorithm == PgpPublicKeyAlgorithm.ML_KEM_768_X25519) {
-            var senderKeyAgreementKey = Objects.requireNonNull(
+            PgpKeyReference senderKeyAgreementKey = Objects.requireNonNull(
                     request.senderKeyAgreementKey(),
                     "senderKeyAgreementKey wird fuer schluesselaustausch-basierte Algorithmen benoetigt");
             return new HsmCompositeMlKemKeyEncryptionMethodGenerator(
@@ -171,7 +173,7 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
     }
 
     private void writeLiteralData(OutputStream encryptedOut, byte[] plaintext) throws IOException {
-        var literalGenerator = new PGPLiteralDataGenerator();
+        PGPLiteralDataGenerator literalGenerator = new PGPLiteralDataGenerator();
         try (OutputStream literalOut = literalGenerator.open(
                 encryptedOut, PGPLiteralData.BINARY, "", plaintext.length, PgpKeyMaterialCodec.FIXED_CREATION_TIME)) {
             literalOut.write(plaintext);
@@ -184,11 +186,12 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
             return decryptComposite(request);
         }
         try {
-            var factory = new PGPObjectFactory(request.message().encoded().value(), FINGERPRINT_CALCULATOR);
-            var encryptedDataList = nextOfType(factory, PGPEncryptedDataList.class, "Keine verschluesselten Daten gefunden");
+            PGPObjectFactory factory = new PGPObjectFactory(request.message().encoded().value(), fingerprintCalculator);
+            PGPEncryptedDataList encryptedDataList =
+                    nextOfType(factory, PGPEncryptedDataList.class, "Keine verschluesselten Daten gefunden");
 
             PGPPublicKeyEncryptedData encryptedData = null;
-            for (var data : encryptedDataList) {
+            for (PGPEncryptedData data : encryptedDataList) {
                 if (data instanceof PGPPublicKeyEncryptedData candidate) {
                     encryptedData = candidate;
                     break;
@@ -198,16 +201,16 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
                 throw new OpenPgpDecryptionFailedException("Kein passendes verschluesseltes Sitzungsschluessel-Paket gefunden");
             }
 
-            var recipientAlgorithm = request.recipient().publicKey().algorithm();
+            PgpPublicKeyAlgorithm recipientAlgorithm = request.recipient().publicKey().algorithm();
             PublicKeyDataDecryptorFactory decryptorFactory = decryptorFactoryFor(recipientAlgorithm, request.recipient());
 
             // encryptedData.verify() liest intern denselben (internen) Stream weiter, den
             // getDataStream() zurueckgibt - der Stream darf daher vor dem verify()-Aufruf
             // NICHT geschlossen werden (siehe PGPEncryptedData#verify(): "can only be called
             // after the message has been read").
-            var decryptedStream = encryptedData.getDataStream(decryptorFactory);
-            var innerFactory = new PGPObjectFactory(decryptedStream, FINGERPRINT_CALCULATOR);
-            var literalData = nextOfType(innerFactory, PGPLiteralData.class, "Kein Literal-Data-Paket gefunden");
+            InputStream decryptedStream = encryptedData.getDataStream(decryptorFactory);
+            PGPObjectFactory innerFactory = new PGPObjectFactory(decryptedStream, fingerprintCalculator);
+            PGPLiteralData literalData = nextOfType(innerFactory, PGPLiteralData.class, "Kein Literal-Data-Paket gefunden");
             byte[] plaintext = literalData.getInputStream().readAllBytes();
 
             if (!encryptedData.verify()) {
@@ -227,7 +230,7 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
             return new HsmRsaPublicKeyDataDecryptorFactory(rsaExecutor, aesExecutor, recipient.keyHandle());
         }
         if (algorithm == PgpPublicKeyAlgorithm.X25519 || algorithm == PgpPublicKeyAlgorithm.ECDH) {
-            return new HsmEcdhPublicKeyDataDecryptorFactory(keyAgreementExecutor, aesExecutor, recipient);
+            return new HsmEcdhPublicKeyDataDecryptorFactory(keyAgreementExecutor, aesExecutor, recipient, fingerprintCalculator);
         }
         throw new IllegalArgumentException(
                 "Algorithmus " + algorithm + " wird von dieser Bridge nicht fuer Entschluesselung unterstuetzt");
@@ -242,39 +245,40 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
     private ByteSequence decryptComposite(OpenPgpDecryptionRequest request) {
         try {
             byte[] message = request.message().encoded().value();
-            var leadingPacket = HsmCompositeMlKemPkeskCodec.readPacketHeader(message, 0);
+            HsmCompositeMlKemPkeskCodec.RawPacket leadingPacket = HsmCompositeMlKemPkeskCodec.readPacketHeader(message, 0);
             if (leadingPacket.tag() != PacketTags.PUBLIC_KEY_ENC_SESSION) {
                 throw new OpenPgpDecryptionFailedException(
                         "Erwartetes PKESK-Paket nicht gefunden (Paket-Tag " + leadingPacket.tag() + ")");
             }
-            var pkeskHeader = HsmCompositeMlKemPkeskCodec.parsePkeskBody(leadingPacket.body());
+            HsmCompositeMlKemPkeskCodec.ParsedPkeskHeader pkeskHeader =
+                    HsmCompositeMlKemPkeskCodec.parsePkeskBody(leadingPacket.body());
             if (pkeskHeader.algorithm() != PgpKeyMaterialCodec.COMPOSITE_ML_KEM_768_X25519_ALGORITHM_TAG) {
                 throw new OpenPgpDecryptionFailedException(
                         "PKESK-Algorithmus " + pkeskHeader.algorithm() + " passt nicht zum erwarteten"
                                 + " Komposit-Algorithmus " + PgpKeyMaterialCodec.COMPOSITE_ML_KEM_768_X25519_ALGORITHM_TAG);
             }
             boolean isV3 = pkeskHeader.version() == PublicKeyEncSessionPacket.VERSION_3;
-            var algorithmSpecificData = HsmCompositeMlKemPkeskCodec.decodeAlgorithmSpecificData(
-                    pkeskHeader.algorithmSpecificData(), isV3);
+            HsmCompositeMlKemPkeskCodec.DecodedAlgorithmSpecificData algorithmSpecificData =
+                    HsmCompositeMlKemPkeskCodec.decodeAlgorithmSpecificData(pkeskHeader.algorithmSpecificData(), isV3);
 
-            var decryptorFactory = new HsmCompositeMlKemPublicKeyDataDecryptorFactory(
+            HsmCompositeMlKemPublicKeyDataDecryptorFactory decryptorFactory = new HsmCompositeMlKemPublicKeyDataDecryptorFactory(
                     keyAgreementExecutor, keyEncapsulationExecutor, aesExecutor, request.recipient(),
                     algorithmSpecificData, isV3);
 
             byte[] remainder = Arrays.copyOfRange(message, leadingPacket.totalLength(), message.length);
-            var seipdIn = new BCPGInputStream(new ByteArrayInputStream(remainder));
-            var seipdPacket = seipdIn.readPacket();
+            BCPGInputStream seipdIn = new BCPGInputStream(new ByteArrayInputStream(remainder));
+            Packet seipdPacket = seipdIn.readPacket();
             if (!(seipdPacket instanceof InputStreamPacket seipdInputStreamPacket)) {
                 throw new OpenPgpDecryptionFailedException(
                         "Erwartetes SEIPD-Paket nicht gefunden (Paket-Tag " + seipdPacket.getPacketTag() + ")");
             }
 
-            var encryptedData = newSessionKeyEncryptedData(seipdInputStreamPacket);
+            PGPSessionKeyEncryptedData encryptedData = newSessionKeyEncryptedData(seipdInputStreamPacket);
             // encryptedData.verify() liest intern denselben (internen) Stream weiter, den
             // getDataStream() zurueckgibt - siehe gleichlautender Hinweis in decrypt() oben.
-            var decryptedStream = encryptedData.getDataStream(decryptorFactory);
-            var innerFactory = new PGPObjectFactory(decryptedStream, FINGERPRINT_CALCULATOR);
-            var literalData = nextOfType(innerFactory, PGPLiteralData.class, "Kein Literal-Data-Paket gefunden");
+            InputStream decryptedStream = encryptedData.getDataStream(decryptorFactory);
+            PGPObjectFactory innerFactory = new PGPObjectFactory(decryptedStream, fingerprintCalculator);
+            PGPLiteralData literalData = nextOfType(innerFactory, PGPLiteralData.class, "Kein Literal-Data-Paket gefunden");
             byte[] plaintext = literalData.getInputStream().readAllBytes();
 
             if (!encryptedData.verify()) {
@@ -295,9 +299,8 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
      * Konstruktionsweg fuer dieses BC-Objekt fuehrt sonst ausschliesslich ueber
      * {@link PGPEncryptedDataList}, das fuer Algorithmus-ID 35 nicht verwendet werden kann
      * (siehe Klassen-JavaDoc). {@link PGPSessionKeyEncryptedData} ist BCs Gegenstueck zu
-     * {@code gpg --override-session-key}: es kapselt exakt die SEIPD-Entschluesselungs- und
-     * Integritaetspruefungslogik (Praefix-Check + MDC-Vergleich fuer v1, Chunk-Verifikation
-     * fuer v2/AEAD), die alle anderen Algorithmen dieser Bridge bereits ueber
+     * {@code gpg --override-session-key}: es kapselt exakt die SEIPD-v2/AEAD-Entschluesselungs-
+     * und Chunk-Verifikationslogik, die alle anderen Algorithmen dieser Bridge bereits ueber
      * {@link PGPPublicKeyEncryptedData} wiederverwenden.
      */
     private static PGPSessionKeyEncryptedData newSessionKeyEncryptedData(InputStreamPacket seipdPacket) {
@@ -317,22 +320,22 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
     @Override
     public OpenPgpMessage sign(OpenPgpSigningRequest request) {
         try {
-            var signerPublicKey = request.signer().publicKey();
+            PgpPublicKey signerPublicKey = request.signer().publicKey();
             int keyAlgorithmTag = PgpKeyMaterialCodec.toPacketAlgorithmTag(signerPublicKey.algorithm());
-            var signerPgpPublicKey = PgpKeyMaterialCodec.toPgpPublicKey(signerPublicKey);
+            PGPPublicKey signerPgpPublicKey = PgpKeyMaterialCodec.toPgpPublicKey(signerPublicKey, fingerprintCalculator);
 
-            var contentSignerBuilder = new HsmBackedPGPContentSignerBuilder(
+            HsmBackedPGPContentSignerBuilder contentSignerBuilder = new HsmBackedPGPContentSignerBuilder(
                     keyAlgorithmTag, signatureExecutor, request.signer().keyHandle(), signerPgpPublicKey.getKeyID());
-            var signatureGenerator = new PGPSignatureGenerator(contentSignerBuilder, signerPgpPublicKey);
-            var placeholderPrivateKey = PgpKeyMaterialCodec.placeholderPrivateKey(
+            PGPSignatureGenerator signatureGenerator = new PGPSignatureGenerator(contentSignerBuilder, signerPgpPublicKey);
+            PGPPrivateKey placeholderPrivateKey = PgpKeyMaterialCodec.placeholderPrivateKey(
                     signerPgpPublicKey.getPublicKeyPacket(), signerPgpPublicKey.getKeyID());
             signatureGenerator.init(PGPSignature.BINARY_DOCUMENT, placeholderPrivateKey);
 
             byte[] content = request.message().value();
             signatureGenerator.update(content);
 
-            var outputBytes = new ByteArrayOutputStream();
-            var packetOut = new BCPGOutputStream(outputBytes);
+            ByteArrayOutputStream outputBytes = new ByteArrayOutputStream();
+            BCPGOutputStream packetOut = new BCPGOutputStream(outputBytes);
             signatureGenerator.generateOnePassVersion(true).encode(packetOut);
             writeLiteralData(packetOut, content);
             signatureGenerator.generate().encode(packetOut);
@@ -347,7 +350,7 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
     @Override
     public boolean verify(OpenPgpVerificationRequest request) {
         try {
-            var factory = new PGPObjectFactory(request.signedMessage().encoded().value(), FINGERPRINT_CALCULATOR);
+            PGPObjectFactory factory = new PGPObjectFactory(request.signedMessage().encoded().value(), fingerprintCalculator);
             Object current = factory.nextObject();
             if (current instanceof PGPOnePassSignatureList) {
                 current = factory.nextObject();
@@ -357,13 +360,13 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
             }
             byte[] content = literalData.getInputStream().readAllBytes();
 
-            var signatureObject = factory.nextObject();
+            Object signatureObject = factory.nextObject();
             if (!(signatureObject instanceof PGPSignatureList signatureList) || signatureList.isEmpty()) {
                 throw new OpenPgpMessageCodecException("Erwartetes Signatur-Paket nicht gefunden", null);
             }
-            var signature = signatureList.get(0);
+            PGPSignature signature = signatureList.get(0);
 
-            var signerPgpPublicKey = PgpKeyMaterialCodec.toPgpPublicKey(request.signerPublicKey());
+            PGPPublicKey signerPgpPublicKey = PgpKeyMaterialCodec.toPgpPublicKey(request.signerPublicKey(), fingerprintCalculator);
             signature.init(new HsmBackedPGPContentVerifierBuilderProvider(), signerPgpPublicKey);
             signature.update(content);
             return signature.verify();
@@ -374,6 +377,12 @@ public final class HsmBackedOpenPgpMessageCodec implements OpenPgpMessageCodec {
         }
     }
 
+    /**
+     * {@code type.isInstance(current)} wird bereits zur Laufzeit gegen {@code current}
+     * geprueft, bevor der Cast erfolgt - der Compiler kann diese Typsicherheit aber nicht
+     * aus dem generischen Parameter {@code Class<T>} ableiten (Erasure: {@code T} ist zur
+     * Laufzeit nicht bekannt), daher ist die Unterdrueckung hier sicher, aber unvermeidbar.
+     */
     @SuppressWarnings("unchecked")
     private static <T> T nextOfType(PGPObjectFactory factory, Class<T> type, String errorMessage) throws IOException {
         Object current = factory.nextObject();

@@ -12,37 +12,30 @@ import org.bouncycastle.openpgp.operator.PGPDigestCalculator;
 
 /**
  * Von allen HSM-gestuetzten {@code PublicKeyDataDecryptorFactory}-Implementierungen
- * dieser Bridge gemeinsam genutzte Bausteine zum Entschluesseln der
- * symmetrisch geschuetzten Nutzlast - unabhaengig davon, welcher
- * asymmetrische Algorithmus den Sitzungsschluessel aufgeschlossen hat (siehe
- * {@link HsmBackedPGPDataEncryptorBuilder} fuer das jeweilige
- * Verschluesselungs-Gegenstueck).
+ * dieser Bridge gemeinsam genutzter Baustein zum Entschluesseln der
+ * symmetrisch AEAD-geschuetzten Nutzlast (SEIPD v2, RFC 9580) - unabhaengig
+ * davon, welcher asymmetrische Algorithmus den Sitzungsschluessel
+ * aufgeschlossen hat (siehe {@link HsmBackedPGPDataEncryptorBuilder} fuer
+ * das Verschluesselungs-Gegenstueck).
  */
 final class HsmSymmetricDecryptorSupport {
 
     private HsmSymmetricDecryptorSupport() {}
 
-    /** Legacy-Profil (SEIPD v1): Plain-CFB mit Null-IV ueber Einzelblock-HSM-Aufrufe (siehe {@link HsmCfbEngine}). */
-    static PGPDataDecryptor createCfbDecryptor(HsmAesEncryptionExecutor executor, byte[] sessionKey) {
-        return new PGPDataDecryptor() {
-            @Override
-            public InputStream getInputStream(InputStream in) {
-                return new HsmCfbInputStream(in, new HsmCfbEngine(executor, sessionKey));
-            }
-
-            @Override
-            public int getBlockSize() {
-                return HsmCfbEngine.blockLength();
-            }
-
-            @Override
-            public PGPDigestCalculator getIntegrityCalculator() {
-                return new LocalSha1DigestCalculator();
-            }
-        };
-    }
-
-    /** Modernes Profil (SEIPD v2/AEAD): Chunk-weise AES-256-GCM ueber HSM. */
+    /**
+     * Baut einen {@link PGPDataDecryptor} fuer SEIPD v2/AEAD: leitet Nachrichtenschluessel
+     * und Nonce-Praefix per HKDF-SHA256 aus Sitzungsschluessel und im Paket enthaltenem
+     * Salt ab (RFC 9580 Section 5.13.2) und liest anschliessend Chunk-weise AES-256-GCM-Blöcke
+     * ueber {@link HsmAeadChunkCodec}.
+     *
+     * <p>Anders als ein Klartext-Stream kann die AEAD-Nutzlast nicht Chunk-fuer-Chunk an den
+     * Aufrufer durchgereicht werden, bevor der abschliessende, laengenauthentisierende
+     * Nachrichten-Tag (letztes "Chunk", siehe {@link HsmAeadChunkCodec#verifyFinalTag}) geprueft
+     * ist - sonst koennte ein Angreifer die Nachricht unbemerkt kuerzen (Truncation-Angriff).
+     * {@link #createAeadDecryptor} liest daher den kompletten Ciphertext vorab ein, entschluesselt
+     * und verifiziert alle Chunks inklusive Nachrichten-Tag, und liefert erst danach den fertigen
+     * Klartext als {@link ByteArrayInputStream} zurueck.</p>
+     */
     static PGPDataDecryptor createAeadDecryptor(
             HsmAesEncryptionExecutor executor, SymmetricEncIntegrityPacket seipd, byte[] sessionKey) {
         byte[] hkdfInfo = seipd.getAAData();
@@ -52,7 +45,7 @@ final class HsmSymmetricDecryptorSupport {
                 sessionKey, seipd.getSalt(), hkdfInfo, keyLength + ivLength - 8);
         byte[] messageKey = Arrays.copyOfRange(messageKeyAndIv, 0, keyLength);
         byte[] iv = Arrays.copyOf(Arrays.copyOfRange(messageKeyAndIv, keyLength, messageKeyAndIv.length), ivLength);
-        var codec = new HsmAeadChunkCodec(executor, messageKey, iv, hkdfInfo);
+        HsmAeadChunkCodec codec = new HsmAeadChunkCodec(executor, messageKey, iv, hkdfInfo);
         long chunkLength = HsmAeadChunkCodec.chunkLength(seipd.getChunkSize());
 
         return new PGPDataDecryptor() {
@@ -71,6 +64,14 @@ final class HsmSymmetricDecryptorSupport {
                 return null;
             }
 
+            /**
+             * Liest die vollstaendige Ciphertext-Wire-Darstellung (fortlaufende
+             * {@code chunkLength + TAG_LENGTH}-Byte-Records, gefolgt vom
+             * {@code TAG_LENGTH}-Byte-langen Nachrichten-Tag), entschluesselt jeden
+             * Record einzeln ueber {@link HsmAeadChunkCodec#decryptChunk} und haengt
+             * den jeweils zurueckgegebenen Klartext-Chunk an - siehe Klassen-JavaDoc
+             * dieser Methode zur Begruendung, warum das nicht streamend erfolgen kann.
+             */
             private byte[] decryptAll(InputStream in) {
                 byte[] all;
                 try {
@@ -85,7 +86,7 @@ final class HsmSymmetricDecryptorSupport {
                     throw new OpenPgpDecryptionFailedException("AEAD-Nutzlast ist kuerzer als der Nachrichten-Tag");
                 }
 
-                var plaintext = new ByteArrayOutputStream();
+                ByteArrayOutputStream plaintext = new ByteArrayOutputStream();
                 long chunkIndex = 0;
                 int offset = 0;
                 while (offset < chunkBytesTotal) {

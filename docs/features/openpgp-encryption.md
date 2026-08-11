@@ -2,8 +2,8 @@
 
 ## Implementation Status
 
-All four encryption profiles described below are implemented, including the post-quantum
-composite (ML-KEM-768 + X25519, algorithm ID 35, RFC 9980) — see
+All four public-key encryption profiles described below are implemented, including the
+post-quantum composite (ML-KEM-768 + X25519, algorithm ID 35, RFC 9980) — see
 `docs/technical/openpgp-hsm-bridge.md` Section 7 for the implementation detail and the RFC-9980
 test-vector-based correctness proof (no interoperability test is possible for this profile — see
 that section for why). One implementation detail deviates from this spec's original
@@ -12,9 +12,19 @@ composite recipient with a single `PgpKeyReference`/key handle (the ML-KEM compo
 the second (X25519) component's handle deterministically by naming convention rather than
 carrying an explicit pair type — see `CompositeMlKemKeyMaterial` in the technical doc.
 
+**Correction to the original spec below (implementation-review decision):** this feature was
+originally specified with a choice between two *symmetric container* profiles — legacy SEIPD v1
+(CFB + Modification Detection Code) and modern SEIPD v2 (AEAD/AES-256-GCM). A later implementation
+review found that supporting the cryptographically weaker legacy profile added implementation and
+maintenance surface with no benefit for this PoC's purpose, so it was removed: the bridge now
+supports **only** SEIPD v2/AEAD. `PgpEncryptionProfile` no longer exists as a domain type or
+command field; every mention of the legacy profile / a profile *choice* below is historical and
+does not reflect the current implementation (see `docs/technical/openpgp-hsm-bridge.md` Section 3
+for the technical detail, and the "Correction" callouts inline below).
+
 ## Feature Summary
 
-The system encrypts and decrypts OpenPGP messages on behalf of applications that hold no private key material themselves. Every private-key operation — recovering a session key from an encrypted message, deriving a shared secret, or decapsulating a key-encapsulation ciphertext — is delegated to a Hardware Security Module through the abstract Hsm-Primitives bridge; the private key never enters application memory in any form, not even transiently. The feature supports four public-key encryption profiles (classical RSA, native elliptic-curve X25519, classical elliptic-curve ECDH as a fallback, and a post-quantum/classical composite) and two symmetric container profiles (a legacy integrity-protected mode and a modern authenticated-encryption mode), so a single application can address recipients holding keys of different algorithm generations within the same message exchange.
+The system encrypts and decrypts OpenPGP messages on behalf of applications that hold no private key material themselves. Every private-key operation — recovering a session key from an encrypted message, deriving a shared secret, or decapsulating a key-encapsulation ciphertext — is delegated to a Hardware Security Module through the abstract Hsm-Primitives bridge; the private key never enters application memory in any form, not even transiently. The feature supports four public-key encryption profiles (classical RSA, native elliptic-curve X25519, classical elliptic-curve ECDH as a fallback, and a post-quantum/classical composite), so a single application can address recipients holding keys of different algorithm generations within the same message exchange. Every message is symmetrically protected with the same, single container profile: SEIPD v2, authenticated encryption with AES-256-GCM (RFC 9580) — see the "Correction" note above.
 
 ## Actors
 
@@ -43,18 +53,15 @@ These rules apply across all use cases in this feature and constrain every use c
 **Pre-conditions:**
 - The plaintext content to encrypt is available.
 - For every recipient, the recipient's public key material is available and its algorithm is one of: RSA, native elliptic-curve (X25519), classical elliptic-curve (NIST P-256/P-384/P-521 or Brainpool, ECDH), or the post-quantum composite (ML-KEM-768 + X25519, algorithm ID 35).
-- A symmetric container profile has been selected: the legacy profile (SEIPD v1, CFB mode with a Modification Detection Code trailer) or the modern profile (SEIPD v2, AEAD with AES-256-GCM).
 
 **Main Flow:**
-1. The sender supplies the plaintext, one or more recipients' public keys, and the desired symmetric container profile.
+1. The sender supplies the plaintext and one or more recipients' public keys.
 2. The system generates a fresh, random AES-256 session key for this message only.
 3. The system wraps the session key once per recipient, using the algorithm implied by that recipient's own public key — a single message may carry recipients with different algorithm profiles simultaneously:
    - **RSA recipient:** the session key is encrypted directly against the recipient's RSA public key (PKCS#1v1.5 padding) via the HSM's RSA encryption capability, producing a public-key-encrypted session key packet.
    - **Native or classical ECDH recipient:** the system generates a one-time ephemeral elliptic-curve key pair locally, computes the ECDH shared secret between the ephemeral private key and the recipient's static public key (locally — the recipient's private key is not involved on this side), derives a key-wrapping key from the shared secret, and wraps the session key with it. The ephemeral public key travels with the wrapped session key so the recipient can reconstruct the same shared secret later.
    - **Post-quantum composite recipient (algorithm ID 35):** the system performs an ML-KEM-768 encapsulation against the recipient's ML-KEM-768 public key via the HSM's key-encapsulation capability, yielding a KEM ciphertext and a KEM shared secret; independently, it performs the ephemeral X25519 key-agreement step exactly as in the classical ECDH case above. Both shared secrets are combined by a local key-derivation step into a single key-wrapping key, which wraps the session key. The KEM ciphertext and the ephemeral X25519 public key both travel with the wrapped session key.
-4. The system encrypts the plaintext with the session key under the selected symmetric container profile:
-   - **Legacy profile (SEIPD v1):** content is encrypted in OpenPGP-CFB mode (built from single-block AES operations through the HSM's AES capability) and protected with a Modification Detection Code trailer.
-   - **Modern profile (SEIPD v2):** content is encrypted and authenticated with AES-256-GCM through the HSM's AES capability.
+4. The system encrypts the plaintext with the session key under SEIPD v2: content is encrypted and authenticated with AES-256-GCM through the HSM's AES capability, chunk-wise per RFC 9580 Section 5.13.2.
 5. The system assembles the finished OpenPGP message (one wrapped-session-key packet per recipient, followed by the protected data packet) and returns it to the sender.
 
 **Error Flows:**
@@ -65,7 +72,7 @@ These rules apply across all use cases in this feature and constrain every use c
 - For the composite profile, if either the ML-KEM-768 encapsulation or the ephemeral X25519 agreement fails, the whole recipient's session-key wrap fails — no session key is wrapped using only one component's shared secret.
 - Random session-key generation fails (entropy source unavailable) → the operation fails before any recipient-specific work begins.
 
-**Command Fields:** plaintext content; list of recipients, each carrying the recipient's public key material; symmetric container profile selection (legacy v1 or modern v2); optional output encoding preference (binary or ASCII-armored).
+**Command Fields:** plaintext content; list of recipients, each carrying the recipient's public key material; optional output encoding preference (binary or ASCII-armored).
 
 **Result:** the complete encrypted OpenPGP message (binary or ASCII-armored, per the requested encoding), containing one wrapped-session-key packet per recipient and one symmetrically protected data packet.
 
@@ -79,7 +86,7 @@ These rules apply across all use cases in this feature and constrain every use c
 
 **Pre-conditions:**
 - The recipient holds an `PgpKeyHandle` (or, for the composite profile, a pair of handles — one per component algorithm) for a private key matching one of the message's wrapped-session-key packets.
-- The message is well-formed and uses a supported symmetric container profile (legacy v1 or modern v2).
+- The message is well-formed and uses SEIPD v2 (see the "Correction" note above — SEIPD v1 is rejected, not supported).
 
 **Main Flow:**
 1. The recipient supplies the encrypted message and the key handle(s) available to it.
@@ -88,18 +95,15 @@ These rules apply across all use cases in this feature and constrain every use c
    - **RSA:** the wrapped session key is decrypted via the HSM's RSA decryption capability using the recipient's key handle.
    - **Native or classical ECDH:** the system derives the shared secret via the HSM's key-agreement capability, using the recipient's key handle together with the ephemeral public key carried in the packet; it then derives the key-wrapping key locally and unwraps the session key.
    - **Post-quantum composite:** the system decapsulates the KEM ciphertext via the HSM's key-encapsulation capability using the recipient's ML-KEM-768 key handle, and independently derives the ECDH shared secret via the HSM's key-agreement capability using the recipient's X25519 key handle and the ephemeral public key carried in the packet. Both shared secrets are combined locally into the key-wrapping key, which unwraps the session key.
-4. The system decrypts the protected data packet with the recovered session key under the message's symmetric container profile:
-   - **Legacy profile (SEIPD v1):** content is decrypted in OpenPGP-CFB mode and the Modification Detection Code trailer is verified.
-   - **Modern profile (SEIPD v2):** content is decrypted and its AES-256-GCM authentication tag is verified.
+4. The system decrypts the protected data packet with the recovered session key under SEIPD v2: content is decrypted chunk-wise and its AES-256-GCM authentication tags — including the final, length-authenticating message tag — are verified.
 5. The system returns the recovered plaintext to the recipient.
 
 **Error Flows:**
 - No wrapped-session-key packet in the message matches any key handle the recipient holds → no-matching-recipient error, decryption is not attempted.
 - Session-key recovery fails for any reason (padding mismatch, checksum mismatch, HSM rejection, unsupported algorithm identifier in the packet) → a single generic session-key-recovery-failure error is reported (see Domain Rule 6); the specific cause is never disclosed to the caller.
-- The Modification Detection Code check fails (legacy profile) → integrity error, the partially decrypted content is discarded and not returned.
-- The AEAD authentication tag check fails (modern profile) → integrity error, the partially decrypted content is discarded and not returned.
+- The AEAD authentication tag check fails → integrity error, the partially decrypted content is discarded and not returned.
 - The message is malformed or truncated → parse error.
-- The message declares a symmetric container version or algorithm the system does not support → unsupported-format error.
+- The message declares a symmetric container version the system does not support (including the legacy SEIPD v1) or an unsupported algorithm → unsupported-format error.
 - For the composite profile, if either the KEM decapsulation or the ECDH agreement fails, the session key is not recovered from the other component alone.
 
 **Command Fields:** the encrypted OpenPGP message; the key handle(s) available to the recipient.
@@ -111,20 +115,20 @@ These rules apply across all use cases in this feature and constrain every use c
 - **`PgpKeyHandle`** (value object) — an opaque reference to a single pre-existing key inside the HSM. Carries no raw key material; carries only what is needed to address the correct HSM key (an opaque identifier) and the single public-key algorithm it belongs to (RSA, native X25519, classical ECDH curve, ML-KEM-768, or a standalone component of a composite algorithm).
 - **`PgpCompositeKeyHandle`** (value object) — pairs two `PgpKeyHandle` instances (one ML-KEM-768 component, one X25519 component) that together represent one recipient's post-quantum composite key pair (algorithm ID 35).
 - **`PgpPublicKeyAlgorithm`** (domain enumeration) — `RSA`, `ECDSA`, `EDDSA`, `X25519`, `ML_KEM_768_X25519` (only `RSA`, `X25519`, classical ECDH curves, and `ML_KEM_768_X25519` are relevant to encryption; `ECDSA`/`EDDSA` apply to the signing feature).
-- **`PgpEncryptionProfile`** (domain enumeration) — `LEGACY_CFB_MDC` (SEIPD v1) or `AEAD_V2` (SEIPD v2, AES-256-GCM); selects the symmetric container profile for a message.
-- **`PgpMessage`** (entity) — the assembled OpenPGP-encrypted message: one wrapped-session-key entry per recipient, plus the symmetrically protected content, plus the encryption profile that was used to protect it.
+- ~~**`PgpEncryptionProfile`** (domain enumeration) — `LEGACY_CFB_MDC` (SEIPD v1) or `AEAD_V2` (SEIPD v2, AES-256-GCM); selects the symmetric container profile for a message.~~ **Removed** — see the "Correction" note at the top of this document; only SEIPD v2/AEAD is supported, so there is no longer a profile to select and this type does not exist in the codebase.
+- **`PgpMessage`** (entity) — the assembled OpenPGP-encrypted message: one wrapped-session-key entry per recipient, plus the symmetrically protected content.
 
 ## Domain Rules (algorithm-specific)
 
 - A wrapped-session-key entry always carries enough information to identify which recipient key it targets (a key identifier), independent of the algorithm used to wrap it.
-- The AES session key size is fixed at 256 bits for both symmetric container profiles.
+- The AES session key size is fixed at 256 bits.
 - The composite profile's two shared secrets are combined by a single deterministic key-derivation step; the same combination method must be used identically on the encrypt and decrypt sides for the derived key-wrapping key to match.
 
 ## Port Additions
 
 **Outbound (infrastructure) ports:**
 - **RSA encryption capability** (reuse of an existing HSM primitive) — encrypts and decrypts a session key against an RSA key handle, PKCS#1v1.5 padding.
-- **AES encryption capability** (reuse of an existing HSM primitive, cipher-mode parameterized) — performs AES-256-GCM authenticated encryption/decryption for the modern container profile, and single-block AES operations used to build the legacy CFB container profile.
+- **AES encryption capability** (reuse of an existing HSM primitive, cipher-mode parameterized) — performs AES-256-GCM authenticated encryption/decryption for the SEIPD v2/AEAD container, and single-block AES operations used to build the RFC-3394 key-wrap step shared by the ECDH and composite profiles.
 - **Key-agreement capability** (new) — derives an ECDH shared secret from a recipient's HSM-resident private key handle and a peer's public key, parameterized by curve (X25519 native, or a classical NIST/Brainpool curve as fallback). Used only on the decrypting side, where a persisted private key handle is involved.
 - **Key-encapsulation capability** (new) — performs ML-KEM-768 encapsulation (against a public key, no key handle required) and decapsulation (against a recipient's HSM-resident private key handle), for the post-quantum component of the composite profile.
 
@@ -145,6 +149,6 @@ These rules apply across all use cases in this feature and constrain every use c
 
 1. Should compression (ZIP/ZLIB) of the literal data packet be applied before encryption, or should the plaintext always be wrapped directly and uncompressed? Standard OpenPGP tooling typically compresses; this PoC's interoperability goal may require matching that behavior.
 2. Should a single encrypted message be allowed to mix recipients across all four algorithm profiles simultaneously (as described in UC-1), or should the first implementation iteration restrict a message to recipients of a single profile for simplicity, expanding later?
-3. Is there any restriction on which symmetric container profile (legacy v1 vs modern v2) may be combined with which public-key encryption profile, or are all sixteen combinations equally valid for this PoC's demonstration purpose? Real-world OpenPGP guidance discourages combining the modern container with keys that predate it, but this PoC's stated goal is to demonstrate the bridge, not to enforce production policy — needs an explicit decision before implementation.
+3. ~~Is there any restriction on which symmetric container profile (legacy v1 vs modern v2) may be combined with which public-key encryption profile...~~ **Resolved (implementation-review decision):** moot — the legacy SEIPD v1 container profile was removed entirely (see the "Correction" note at the top of this document), so every public-key encryption profile is now combined with SEIPD v2/AEAD only.
 4. ~~Where should the RFC 3394 AES-Key-Wrap step...~~ **Resolved during implementation:** through the HSM's AES capability, reusing the same single-block-ECB composition (`HsmAesKeyWrap`) that both the classical ECDH profile and the composite profile now share — consistent with keeping every symmetric primitive routed through the HSM abstraction even where the key material is ephemeral.
 5. How should multiple recipient key handles held by the same caller be resolved if more than one matches a wrapped-session-key packet in a message (e.g. duplicate key material) — first match, or an explicit error?

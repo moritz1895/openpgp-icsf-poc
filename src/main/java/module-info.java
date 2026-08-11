@@ -18,7 +18,7 @@ open module ms.rohde.openpgpicsfpoc {
     requires transitive org.jspecify;
     requires transitive jakarta.inject;
     requires transitive ms.rohde.hexagonalarch.annotations;
-    requires org.bouncycastle.pg;
+    requires transitive org.bouncycastle.pg;
     requires org.bouncycastle.util;
     requires org.bouncycastle.provider;
     requires ms.rohde.hexagonalarch.spring;

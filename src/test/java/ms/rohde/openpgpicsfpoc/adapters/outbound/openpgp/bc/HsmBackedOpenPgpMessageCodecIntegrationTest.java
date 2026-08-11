@@ -7,45 +7,40 @@ import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
 import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
 import ms.rohde.openpgpicsfpoc.core.domain.OpenPgpMessage;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpEllipticCurve;
-import ms.rohde.openpgpicsfpoc.core.domain.PgpEncryptionProfile;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpDecryptionRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpEncryptionRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpSigningRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpVerificationRequest;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.EnumSource;
 
 /**
  * Vollstaendige Rundlauf-Integrationstests der Bouncy-Castle-Bridge ueber die
  * Dummy-Hsm-Adapter (siehe {@link HsmTestFixture}) - fuer jede
- * Algorithmus-/Profil-Kombination dieser Iteration (RSA, natives X25519,
- * klassisches ECDH-Fallback ueber P-256, jeweils Legacy-CFB+MDC und
- * AEAD/GCM) sowie fuer Signieren/Verifizieren (RSA, ECDSA, EdDSA).
+ * Empfaenger-Algorithmus-Kombination dieser Iteration (RSA, natives X25519,
+ * klassisches ECDH-Fallback ueber P-256/P-384, komposites
+ * ML-KEM-768+X25519), stets nach SEIPD v2/AEAD (RFC 9580, dem einzigen von
+ * dieser PoC unterstuetzten Verschluesselungsprofil), sowie fuer
+ * Signieren/Verifizieren (RSA, ECDSA, EdDSA).
  */
 class HsmBackedOpenPgpMessageCodecIntegrationTest {
 
     private static final ByteSequence PLAINTEXT = ByteSequence.of("Hallo HSM-gestuetztes OpenPGP!".getBytes());
 
-    @ParameterizedTest
-    @EnumSource(PgpEncryptionProfile.class)
-    void encryptThenDecrypt_givenRsaRecipient_thenRecoversPlaintext(PgpEncryptionProfile profile) throws Exception {
+    @Test
+    void encryptThenDecrypt_givenRsaRecipient_thenRecoversPlaintext() throws Exception {
         var fixture = new HsmTestFixture();
         var keyPair = PgpTestKeys.generateRsa();
         var recipient = fixture.registerRecipient("bob-rsa", keyPair, PgpTestKeys.rsaPublicKey(keyPair));
 
-        OpenPgpMessage encrypted =
-                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, profile, recipient, null));
+        OpenPgpMessage encrypted = fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, recipient, null));
         ByteSequence decrypted = fixture.codec.decrypt(new OpenPgpDecryptionRequest(encrypted, recipient));
 
         assertThat(decrypted).isEqualTo(PLAINTEXT);
     }
 
-    @ParameterizedTest
-    @EnumSource(PgpEncryptionProfile.class)
-    void encryptThenDecrypt_givenNativeX25519Recipient_thenRecoversPlaintext(PgpEncryptionProfile profile)
-            throws Exception {
+    @Test
+    void encryptThenDecrypt_givenNativeX25519Recipient_thenRecoversPlaintext() throws Exception {
         var fixture = new HsmTestFixture();
         var recipientKeyPair = PgpTestKeys.generateX25519();
         var recipient = fixture.registerRecipient(
@@ -55,16 +50,14 @@ class HsmBackedOpenPgpMessageCodecIntegrationTest {
                 "alice-x25519", senderKeyPair, PgpTestKeys.x25519PublicKey(senderKeyPair));
 
         OpenPgpMessage encrypted =
-                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, profile, recipient, sender));
+                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, recipient, sender));
         ByteSequence decrypted = fixture.codec.decrypt(new OpenPgpDecryptionRequest(encrypted, recipient));
 
         assertThat(decrypted).isEqualTo(PLAINTEXT);
     }
 
-    @ParameterizedTest
-    @EnumSource(PgpEncryptionProfile.class)
-    void encryptThenDecrypt_givenClassicalEcdhP256Recipient_thenRecoversPlaintext(PgpEncryptionProfile profile)
-            throws Exception {
+    @Test
+    void encryptThenDecrypt_givenClassicalEcdhP256Recipient_thenRecoversPlaintext() throws Exception {
         var fixture = new HsmTestFixture();
         var recipientKeyPair = PgpTestKeys.generateEc(PgpEllipticCurve.P256);
         var recipient = fixture.registerRecipient(
@@ -74,7 +67,7 @@ class HsmBackedOpenPgpMessageCodecIntegrationTest {
                 "alice-p256", senderKeyPair, PgpTestKeys.ecdhPublicKey(senderKeyPair, PgpEllipticCurve.P256));
 
         OpenPgpMessage encrypted =
-                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, profile, recipient, sender));
+                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, recipient, sender));
         ByteSequence decrypted = fixture.codec.decrypt(new OpenPgpDecryptionRequest(encrypted, recipient));
 
         assertThat(decrypted).isEqualTo(PLAINTEXT);
@@ -90,17 +83,15 @@ class HsmBackedOpenPgpMessageCodecIntegrationTest {
         var sender = fixture.registerSenderKeyAgreementKey(
                 "alice-p384", senderKeyPair, PgpTestKeys.ecdhPublicKey(senderKeyPair, PgpEllipticCurve.P384));
 
-        OpenPgpMessage encrypted = fixture.codec.encrypt(
-                new OpenPgpEncryptionRequest(PLAINTEXT, PgpEncryptionProfile.LEGACY_CFB_MDC, recipient, sender));
+        OpenPgpMessage encrypted =
+                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, recipient, sender));
         ByteSequence decrypted = fixture.codec.decrypt(new OpenPgpDecryptionRequest(encrypted, recipient));
 
         assertThat(decrypted).isEqualTo(PLAINTEXT);
     }
 
-    @ParameterizedTest
-    @EnumSource(PgpEncryptionProfile.class)
-    void encryptThenDecrypt_givenCompositeMlKem768X25519Recipient_thenRecoversPlaintext(PgpEncryptionProfile profile)
-            throws Exception {
+    @Test
+    void encryptThenDecrypt_givenCompositeMlKem768X25519Recipient_thenRecoversPlaintext() throws Exception {
         var fixture = new HsmTestFixture();
         var recipientEcdhKeyPair = PgpTestKeys.generateX25519();
         var recipientMlKemKeyPair = PgpTestKeys.generateMlKem768();
@@ -115,7 +106,7 @@ class HsmBackedOpenPgpMessageCodecIntegrationTest {
                 "alice-mlkem768-x25519", senderKeyPair, PgpTestKeys.x25519PublicKey(senderKeyPair));
 
         OpenPgpMessage encrypted =
-                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, profile, recipient, sender));
+                fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, recipient, sender));
         ByteSequence decrypted = fixture.codec.decrypt(new OpenPgpDecryptionRequest(encrypted, recipient));
 
         assertThat(decrypted).isEqualTo(PLAINTEXT);
@@ -131,8 +122,7 @@ class HsmBackedOpenPgpMessageCodecIntegrationTest {
                 new PgpKeyReference(new HsmKeyHandle("bob-rsa-wrong"), PgpTestKeys.rsaPublicKey(wrongKeyPair));
         fixture.keyStore.registerKeyPair(new HsmKeyHandle("bob-rsa-wrong"), wrongKeyPair);
 
-        OpenPgpMessage encrypted = fixture.codec.encrypt(
-                new OpenPgpEncryptionRequest(PLAINTEXT, PgpEncryptionProfile.LEGACY_CFB_MDC, recipient, null));
+        OpenPgpMessage encrypted = fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, recipient, null));
 
         assertThatThrownBy(() -> fixture.codec.decrypt(new OpenPgpDecryptionRequest(encrypted, wrongRecipient)))
                 .isInstanceOf(OpenPgpDecryptionFailedException.class);

@@ -11,6 +11,24 @@ import java.util.Arrays;
  * vollen Chunk sofort ueber {@link HsmAeadChunkCodec}; beim Schliessen wird
  * ein etwaiger letzter Teil-Chunk regulaer verschluesselt und zusaetzlich der
  * abschliessende, laengenauthentisierende Nachrichten-Tag angehaengt.
+ *
+ * <p><b>Warum ueberhaupt Chunks statt eines einzelnen GCM-Aufrufs ueber die
+ * gesamte Nachricht?</b> Das ist keine reine Streaming-Optimierung, sondern
+ * von RFC 9580 Section 5.13.2 fuer SEIPD v2 zwingend vorgeschrieben: jeder
+ * Chunk erhaelt sein eigenes GCM-Auth-Tag, sodass ein Angreifer die Nachricht
+ * nicht erst vollstaendig puffern muesste, um sie zu faelschen - ein einzelner
+ * Tag ueber Multi-Gigabyte-Nachrichten waere zudem in der Praxis (v.a. auf
+ * einem HSM mit begrenztem Arbeitsspeicher) kaum handhabbar. Der
+ * abschliessende Nachrichten-Tag (ueber leeren Klartext, aber mit der
+ * Gesamtlaenge in den Additional Authenticated Data) verhindert zusaetzlich,
+ * dass ein Angreifer die Nachricht unbemerkt um ganze Chunks kuerzt
+ * (Truncation-Angriff) - ohne ihn waere ein vorzeitiger Stream-Abbruch nicht
+ * von einer absichtlich kurzen Nachricht zu unterscheiden. Diese Klasse
+ * nutzt die Chunk-Struktur daher zugleich fuer echtes Streaming (Bouncy
+ * Castles {@code PGPEncryptedDataGenerator} schreibt den Klartext ohnehin
+ * inkrementell ueber {@link #write(byte[], int, int)}), aber das waere ohne
+ * die protokollseitige Chunk-Pflicht kein hinreichender Grund fuer diese
+ * Klasse gewesen.</p>
  */
 final class HsmAeadOutputStream extends OutputStream {
 

@@ -11,7 +11,6 @@ import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
 import ms.rohde.openpgpicsfpoc.core.domain.MissingKeyAgreementKeyException;
 import ms.rohde.openpgpicsfpoc.core.domain.OpenPgpMessage;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpEllipticCurve;
-import ms.rohde.openpgpicsfpoc.core.domain.PgpEncryptionProfile;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKey;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKeyAlgorithm;
@@ -56,8 +55,7 @@ class EncryptOpenPgpMessageServiceTest {
     @Test
     void encrypt_givenRsaRecipient_thenDelegatesToCodecWithoutSenderKey() {
         var recipient = keyReference("bob-rsa", PgpPublicKeyAlgorithm.RSA);
-        var command = new EncryptOpenPgpMessageCommand(
-                ByteSequence.of("hello".getBytes()), recipient, null, PgpEncryptionProfile.LEGACY_CFB_MDC);
+        var command = new EncryptOpenPgpMessageCommand(ByteSequence.of("hello".getBytes()), recipient, null);
         given(codec.encrypt(any())).willReturn(codecResult());
 
         var result = service.encrypt(command);
@@ -68,15 +66,13 @@ class EncryptOpenPgpMessageServiceTest {
         assertThat(captor.getValue().plaintext()).isEqualTo(ByteSequence.of("hello".getBytes()));
         assertThat(captor.getValue().recipient()).isEqualTo(recipient);
         assertThat(captor.getValue().senderKeyAgreementKey()).isNull();
-        assertThat(captor.getValue().profile()).isEqualTo(PgpEncryptionProfile.LEGACY_CFB_MDC);
     }
 
     @Test
     void encrypt_givenX25519RecipientWithSenderKey_thenDelegatesToCodecWithSenderKey() {
         var recipient = keyReference("bob-x25519", PgpPublicKeyAlgorithm.X25519);
         var sender = keyReference("alice-x25519", PgpPublicKeyAlgorithm.X25519);
-        var command = new EncryptOpenPgpMessageCommand(
-                ByteSequence.of("hello".getBytes()), recipient, sender, PgpEncryptionProfile.AEAD_V2);
+        var command = new EncryptOpenPgpMessageCommand(ByteSequence.of("hello".getBytes()), recipient, sender);
         given(codec.encrypt(any())).willReturn(codecResult());
 
         var result = service.encrypt(command);
@@ -90,8 +86,7 @@ class EncryptOpenPgpMessageServiceTest {
     @Test
     void encrypt_givenX25519RecipientWithoutSenderKey_thenThrowsMissingKeyAgreementKeyException() {
         var recipient = keyReference("bob-x25519", PgpPublicKeyAlgorithm.X25519);
-        var command = new EncryptOpenPgpMessageCommand(
-                ByteSequence.of("hello".getBytes()), recipient, null, PgpEncryptionProfile.AEAD_V2);
+        var command = new EncryptOpenPgpMessageCommand(ByteSequence.of("hello".getBytes()), recipient, null);
 
         assertThatThrownBy(() -> service.encrypt(command)).isInstanceOf(MissingKeyAgreementKeyException.class);
         then(codec).shouldHaveNoInteractions();
@@ -101,8 +96,7 @@ class EncryptOpenPgpMessageServiceTest {
     void encrypt_givenEcdhRecipientWithSenderKey_thenDelegatesToCodec() {
         var recipient = ecdhKeyReference("bob-p256", PgpEllipticCurve.P256);
         var sender = keyReference("alice-x25519", PgpPublicKeyAlgorithm.X25519);
-        var command = new EncryptOpenPgpMessageCommand(
-                ByteSequence.of("hello".getBytes()), recipient, sender, PgpEncryptionProfile.LEGACY_CFB_MDC);
+        var command = new EncryptOpenPgpMessageCommand(ByteSequence.of("hello".getBytes()), recipient, sender);
         given(codec.encrypt(any())).willReturn(codecResult());
 
         var result = service.encrypt(command);
@@ -116,8 +110,7 @@ class EncryptOpenPgpMessageServiceTest {
     @Test
     void encrypt_givenEcdhRecipientWithoutSenderKey_thenThrowsMissingKeyAgreementKeyException() {
         var recipient = ecdhKeyReference("bob-p384", PgpEllipticCurve.P384);
-        var command = new EncryptOpenPgpMessageCommand(
-                ByteSequence.of("hello".getBytes()), recipient, null, PgpEncryptionProfile.LEGACY_CFB_MDC);
+        var command = new EncryptOpenPgpMessageCommand(ByteSequence.of("hello".getBytes()), recipient, null);
 
         assertThatThrownBy(() -> service.encrypt(command)).isInstanceOf(MissingKeyAgreementKeyException.class);
         then(codec).shouldHaveNoInteractions();
@@ -127,8 +120,7 @@ class EncryptOpenPgpMessageServiceTest {
     void encrypt_givenCompositeRecipientWithSenderKey_thenDelegatesToCodec() {
         var recipient = keyReference("bob-mlkem", PgpPublicKeyAlgorithm.ML_KEM_768_X25519);
         var sender = keyReference("alice-x25519", PgpPublicKeyAlgorithm.X25519);
-        var command = new EncryptOpenPgpMessageCommand(
-                ByteSequence.of("hello".getBytes()), recipient, sender, PgpEncryptionProfile.AEAD_V2);
+        var command = new EncryptOpenPgpMessageCommand(ByteSequence.of("hello".getBytes()), recipient, sender);
         given(codec.encrypt(any())).willReturn(codecResult());
 
         var result = service.encrypt(command);
@@ -140,8 +132,7 @@ class EncryptOpenPgpMessageServiceTest {
     @Test
     void encrypt_givenCompositeRecipientWithoutSenderKey_thenThrowsMissingKeyAgreementKeyException() {
         var recipient = keyReference("bob-mlkem", PgpPublicKeyAlgorithm.ML_KEM_768_X25519);
-        var command = new EncryptOpenPgpMessageCommand(
-                ByteSequence.of("hello".getBytes()), recipient, null, PgpEncryptionProfile.AEAD_V2);
+        var command = new EncryptOpenPgpMessageCommand(ByteSequence.of("hello".getBytes()), recipient, null);
 
         assertThatThrownBy(() -> service.encrypt(command)).isInstanceOf(MissingKeyAgreementKeyException.class);
         then(codec).shouldHaveNoInteractions();
@@ -150,8 +141,7 @@ class EncryptOpenPgpMessageServiceTest {
     @Test
     void encrypt_givenSignatureOnlyAlgorithm_thenThrowsUnsupportedEncryptionAlgorithmException() {
         var recipient = keyReference("bob-ecdsa", PgpPublicKeyAlgorithm.ECDSA);
-        var command = new EncryptOpenPgpMessageCommand(
-                ByteSequence.of("hello".getBytes()), recipient, null, PgpEncryptionProfile.LEGACY_CFB_MDC);
+        var command = new EncryptOpenPgpMessageCommand(ByteSequence.of("hello".getBytes()), recipient, null);
 
         assertThatThrownBy(() -> service.encrypt(command))
                 .isInstanceOf(UnsupportedEncryptionAlgorithmException.class);

@@ -48,8 +48,9 @@ Dauerbetrieb, kein HTTP-Port. Er erzeugt lokal frische Demo-Schlüsselpaare (RSA
 klassisches ECDH/ECDSA über P-256, komposites ML-KEM-768+X25519) und registriert sie über den
 Dummy-Hsm-Adapter als bereits im (simulierten) HSM vorhanden, da diese PoC keinen
 Hsm-Keygen-Port kennt. Anschließend durchläuft er für jede Empfänger-Algorithmus-Kombination
-beide SEIPD-Container-Profile (`LEGACY_CFB_MDC`, `AEAD_V2`) je einmal verschlüsseln →
-entschlüsseln, sowie für jeden Signaturalgorithmus einmal signieren → verifizieren — insgesamt 11
+einmal verschlüsseln → entschlüsseln (stets nach SEIPD v2/AEAD, RFC 9580 — dem einzigen von
+dieser PoC unterstützten Verschlüsselungsprofil, siehe „Bekannte Einschränkungen" unten), sowie
+für jeden Signaturalgorithmus einmal signieren → verifizieren — insgesamt 7
 Durchläufe. Die Post-Quantum-**Signatur** (ML-DSA-65+Ed25519) ist noch nicht implementiert und
 daher nicht Teil der Demo. Jeder Durchlauf sowie eine Gesamtzusammenfassung werden über Log4j2
 ausgegeben; schlägt auch nur ein Durchlauf fehl, beendet sich der Prozess mit einem Fehler
@@ -69,6 +70,7 @@ Ausführlich begründet in [`docs/technical/openpgp-hsm-bridge.md`](docs/technic
 
 - **Post-Quantum-Signatur (ML-DSA-65+Ed25519, RFC 9980) nicht implementiert.** Erfordert v6-Schlüssel/-Signaturen (siehe RFC 9980 Section 3.5, sowie [`docs/technical/pqc-notes.md`](docs/technical/pqc-notes.md)), die diese PoC noch nicht modelliert — als eigene Iteration geplant. Die Post-Quantum-**Verschlüsselung** ML-KEM-768+X25519 (Algorithmus-ID 35, mit v4-Schlüsseln zulässig) ist implementiert; `bcpg` 1.85 kennt deren Paketstrukturen zwar ebenfalls nicht, die Bridge umgeht das jedoch selbst (siehe `docs/technical/openpgp-hsm-bridge.md`, Abschnitt 7).
 - **EdDSA/Ed25519-Signaturen sind über den digest-basierten `HsmSignature`-Port nicht interoperabel** mit "Pure EdDSA" externer Tools (RSA und ECDSA sind vollständig interop-getestet, Ed25519 rundläuft nur innerhalb dieser Bridge selbst).
+- **Nur SEIPD v2/AEAD (RFC 9580) wird unterstützt** — das ältere, MDC-basierte Profil SEIPD v1 (RFC 4880, Plain-CFB) wurde bewusst aus der Bridge entfernt: ein zusätzliches, kryptographisch schwächeres Profil ohne fachlichen Mehrwert für diese PoC hätte nur unnötigen Implementierungs- und Pflegeaufwand bedeutet. Ein Verschlüsseln oder Entschlüsseln mit SEIPD v1 schlägt daher explizit mit einer `PGPException` fehl.
 - **`EphemeralPeerKeyHandles`/`CompositeMlKemKeyMaterial`** sind Test-Fixture-Workarounds für die fehlende Absenderreferenz beim Entschlüsseln bzw. die Zwei-Handle-Konvention komposit-verschlüsselter Empfänger, keine produktionsreife Lösung.
 - **X25519-ECDH- und ML-KEM-Encapsulate/Decapsulate-Unterstützung auf echtem CCA/ICSF sind unbestätigt** — siehe [`docs/technical/icsf-cca-gap-analysis.md`](docs/technical/icsf-cca-gap-analysis.md) für die verb-genaue Aufschlüsselung, was belegt ist und was vor einer echten Anbindung geklärt werden muss.
 - Kein Hsm-Keygen-Port — Schlüssel werden als vorab im HSM vorhandene Key-Handles angenommen; die Demo erzeugt ihre Testschlüssel lokal und registriert sie beim Dummy-Hsm-Adapter.

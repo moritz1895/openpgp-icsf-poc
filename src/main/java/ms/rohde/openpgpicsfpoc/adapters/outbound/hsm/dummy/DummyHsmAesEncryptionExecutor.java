@@ -57,15 +57,24 @@ public final class DummyHsmAesEncryptionExecutor implements HsmAesEncryptionExec
     private HsmAesEncryptionResult executeWithIv(HsmAesEncryptionRequest request, String transformation)
             throws GeneralSecurityException {
         Cipher cipher = Cipher.getInstance(transformation);
-        var iv = Objects.requireNonNull(request.initializationVector(), "initializationVector fehlt");
+        ByteSequence iv = Objects.requireNonNull(request.initializationVector(), "initializationVector fehlt");
         cipher.init(cipherMode(request.operation()), secretKey(request), new IvParameterSpec(iv.value()));
         return new HsmAesEncryptionResult(ByteSequence.of(cipher.doFinal(request.input().value())), null);
     }
 
+    /**
+     * {@code javax.crypto.Cipher} kennt kein getrenntes Auth-Tag-Feld: es haengt beim
+     * Verschluesseln das {@value #GCM_TAG_LENGTH_BYTES}-Byte-Tag an das Chiffrat an und
+     * erwartet es beim Entschluesseln ebenso angehaengt. Diese Methode spaltet das Tag
+     * beim Verschluesseln daher ab dem letzten Byte-Bereich manuell vom Chiffrat ab
+     * ({@link Arrays#copyOfRange}) bzw. haengt es beim Entschluesseln wieder an - nur so
+     * passt die JCE-Cipher-API auf {@link HsmAesEncryptionRequest}/{@link HsmAesEncryptionResult},
+     * die (wie eine echte HSM-Schnittstelle) Chiffrat und Tag als getrennte Felder fuehren.
+     */
     private HsmAesEncryptionResult executeGcm(HsmAesEncryptionRequest request) throws GeneralSecurityException {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        var iv = Objects.requireNonNull(request.initializationVector(), "initializationVector fehlt");
-        var gcmSpec = new GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv.value());
+        ByteSequence iv = Objects.requireNonNull(request.initializationVector(), "initializationVector fehlt");
+        GCMParameterSpec gcmSpec = new GCMParameterSpec(GCM_TAG_LENGTH_BITS, iv.value());
         cipher.init(cipherMode(request.operation()), secretKey(request), gcmSpec);
         if (request.additionalAuthenticatedData() != null) {
             cipher.updateAAD(request.additionalAuthenticatedData().value());
@@ -79,7 +88,7 @@ public final class DummyHsmAesEncryptionExecutor implements HsmAesEncryptionExec
             return new HsmAesEncryptionResult(ByteSequence.of(ciphertext), ByteSequence.of(tag));
         }
 
-        var authenticationTag = Objects.requireNonNull(request.authenticationTag(), "authenticationTag fehlt");
+        ByteSequence authenticationTag = Objects.requireNonNull(request.authenticationTag(), "authenticationTag fehlt");
         byte[] ciphertextWithTag = request.input().concat(authenticationTag).value();
         return new HsmAesEncryptionResult(ByteSequence.of(cipher.doFinal(ciphertextWithTag)), null);
     }

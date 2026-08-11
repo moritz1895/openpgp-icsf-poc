@@ -43,6 +43,6 @@ public final class EncryptOpenPgpMessageService implements EncryptOpenPgpMessage
         }
 
         return codec.encrypt(new OpenPgpEncryptionRequest(
-                command.plaintext(), command.profile(), command.recipient(), command.senderKeyAgreementKey()));
+                command.plaintext(), command.recipient(), command.senderKeyAgreementKey()));
     }
 }

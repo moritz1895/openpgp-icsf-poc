@@ -4,7 +4,6 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
 import ms.rohde.openpgpicsfpoc.core.domain.OpenPgpMessage;
-import ms.rohde.openpgpicsfpoc.core.domain.PgpEncryptionProfile;
 import ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpEncryptionRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpSigningRequest;
 import org.bouncycastle.openpgp.PGPEncryptedDataList;
@@ -48,27 +47,12 @@ class HsmBackedOpenPgpMessageCodecInteropTest {
     private static final BcKeyFingerprintCalculator FINGERPRINT_CALCULATOR = new BcKeyFingerprintCalculator();
 
     @Test
-    void encrypt_givenRsaRecipientAndLegacyProfile_thenStandardJceDecryptorRecoversPlaintext() throws Exception {
+    void encrypt_givenRsaRecipient_thenStandardJceDecryptorRecoversPlaintext() throws Exception {
         var fixture = new HsmTestFixture();
         var keyPair = PgpTestKeys.generateRsa();
         var recipient = fixture.registerRecipient("bob-rsa", keyPair, PgpTestKeys.rsaPublicKey(keyPair));
 
-        OpenPgpMessage encrypted = fixture.codec.encrypt(
-                new OpenPgpEncryptionRequest(PLAINTEXT, PgpEncryptionProfile.LEGACY_CFB_MDC, recipient, null));
-
-        byte[] plaintext = decryptWithStandardBouncyCastle(encrypted, keyPair.getPrivate());
-
-        assertThat(plaintext).isEqualTo(PLAINTEXT.value());
-    }
-
-    @Test
-    void encrypt_givenRsaRecipientAndAeadProfile_thenStandardJceDecryptorRecoversPlaintext() throws Exception {
-        var fixture = new HsmTestFixture();
-        var keyPair = PgpTestKeys.generateRsa();
-        var recipient = fixture.registerRecipient("bob-rsa", keyPair, PgpTestKeys.rsaPublicKey(keyPair));
-
-        OpenPgpMessage encrypted = fixture.codec.encrypt(
-                new OpenPgpEncryptionRequest(PLAINTEXT, PgpEncryptionProfile.AEAD_V2, recipient, null));
+        OpenPgpMessage encrypted = fixture.codec.encrypt(new OpenPgpEncryptionRequest(PLAINTEXT, recipient, null));
 
         byte[] plaintext = decryptWithStandardBouncyCastle(encrypted, keyPair.getPrivate());
 
@@ -140,7 +124,7 @@ class HsmBackedOpenPgpMessageCodecInteropTest {
         var signatureList = (PGPSignatureList) factory.nextObject();
         PGPSignature signature = signatureList.get(0);
 
-        var pgpPublicKey = PgpKeyMaterialCodec.toPgpPublicKey(signerPublicKey);
+        var pgpPublicKey = PgpKeyMaterialCodec.toPgpPublicKey(signerPublicKey, FINGERPRINT_CALCULATOR);
         signature.init(new JcaPGPContentVerifierBuilderProvider(), pgpPublicKey);
         signature.update(content);
         return signature.verify();
