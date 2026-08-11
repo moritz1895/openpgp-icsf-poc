@@ -8,6 +8,7 @@ import java.security.interfaces.ECPublicKey;
 import java.security.interfaces.EdECPublicKey;
 import java.security.interfaces.XECPublicKey;
 import java.security.spec.ECGenParameterSpec;
+import java.util.Arrays;
 import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpEllipticCurve;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKey;
@@ -41,6 +42,65 @@ final class PgpTestKeys {
 
     static KeyPair generateEd25519() throws GeneralSecurityException {
         return KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
+    }
+
+    /** Erzeugt ein ML-KEM-768-Schluesselpaar ueber das seit Java 24 (JEP 496) native JCA-Provider. */
+    static KeyPair generateMlKem768() throws GeneralSecurityException {
+        return KeyPairGenerator.getInstance("ML-KEM-768").generateKeyPair();
+    }
+
+    /**
+     * Extrahiert die rohe FIPS-203-Kodierung eines ML-KEM-oeffentlichen Schluessels aus
+     * dessen JCA-X.509-{@code SubjectPublicKeyInfo}-DER-Kodierung ({@code getEncoded()})
+     * durch generisches Ueberspringen der aeusseren SEQUENCE, der
+     * Algorithmus-Kennung-SEQUENCE und des Unused-Bits-Oktetts der BIT STRING - kein
+     * ML-KEM-spezifischer Sonderfall, sondern die allgemeine X.509-SPKI-Struktur (siehe
+     * RFC 5280 Section 4.1). Keine zusaetzliche ASN.1-Bibliotheksabhaengigkeit noetig
+     * (weder {@code bcpg-jdk18on} noch {@code bcutil-jdk18on} bringen die dafuer noetigen
+     * {@code org.bouncycastle.asn1.x509}-Klassen mit).
+     */
+    static byte[] rawMlKemPublicKey(KeyPair keyPair) {
+        return derBitStringContent(keyPair.getPublic().getEncoded());
+    }
+
+    private static byte[] derBitStringContent(byte[] x509Encoded) {
+        int[] cursor = {0};
+        readDerTlvHeader(x509Encoded, cursor); // aeussere SEQUENCE (SubjectPublicKeyInfo)
+        int algorithmIdentifierStart = cursor[0];
+        int[] algorithmCursor = {algorithmIdentifierStart};
+        int[] algorithmHeader = readDerTlvHeader(x509Encoded, algorithmCursor);
+        int bitStringStart = algorithmCursor[0] + algorithmHeader[1]; // Inhalt der AlgorithmIdentifier-SEQUENCE ueberspringen
+        int[] bitStringCursor = {bitStringStart};
+        int[] bitStringHeader = readDerTlvHeader(x509Encoded, bitStringCursor);
+        int contentStart = bitStringCursor[0];
+        int contentLength = bitStringHeader[1];
+        // erstes Inhaltsoktett der BIT STRING = Anzahl ungenutzter Bits (0 fuer byte-alignierte Schluessel)
+        return Arrays.copyOfRange(x509Encoded, contentStart + 1, contentStart + contentLength);
+    }
+
+    /**
+     * Liest einen DER-TLV-Header (Tag + Laenge, Kurz- oder Langform) ab {@code cursor[0]},
+     * setzt {@code cursor[0]} auf den Beginn des Inhalts und liefert {@code {tag, length}}.
+     */
+    private static int[] readDerTlvHeader(byte[] data, int[] cursor) {
+        int offset = cursor[0];
+        int tag = data[offset] & 0xFF;
+        int lengthByte = data[offset + 1] & 0xFF;
+        int length;
+        int headerLength;
+        if ((lengthByte & 0x80) == 0) {
+            length = lengthByte;
+            headerLength = 2;
+        } else {
+            int lengthOctets = lengthByte & 0x7F;
+            length = 0;
+            for (int i = 0; i < lengthOctets; i++) {
+                length = (length << 8) | (data[offset + 2 + i] & 0xFF);
+            }
+            headerLength = 2 + lengthOctets;
+        }
+        cursor[0] = offset + headerLength;
+        return new int[] {tag, length};
     }
 
     static PgpPublicKey rsaPublicKey(KeyPair keyPair) {

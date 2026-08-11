@@ -85,7 +85,7 @@ Die fünf Ports und ihre Verwendung in der Bridge:
 | `HsmAesEncryption` / `HsmAesEncryptionExecutor` | AES in einem von vier Modi (`ECB`/`CBC`/`CFB`/`GCM`), Sitzungsschlüssel als Klartextwert (kein Handle, siehe Abschnitt 4) | `HsmCfbEngine` (ECB als CFB-Baustein), `HsmAeadChunkCodec` (GCM), `HsmAesKeyWrap` (ECB als RFC-3394-Baustein) |
 | `HsmSignature` / `HsmSignatureExecutor` | Ein Algorithmus-Port für RSA/ECDSA/EdDSA/ML-DSA, operiert immer auf einem vorab lokal berechneten Digest | `HsmBackedPGPContentSignerBuilder` |
 | `HsmKeyAgreement` / `HsmKeyAgreementExecutor` | ECDH-Punktmultiplikation, kurvenparametrisiert (`X25519`/`P256`/`P384`), lokaler Handle × Peer-Handle → Shared Secret | `HsmEcdhPublicKeyKeyEncryptionMethodGenerator`, `HsmEcdhPublicKeyDataDecryptorFactory` |
-| `HsmKeyEncapsulation` / `HsmKeyEncapsulationExecutor` | ML-KEM-768 Encapsulate/Decapsulate | **nicht verwendet** — PQC ist außerhalb des Scopes dieser Iteration (siehe Abschnitt 6) |
+| `HsmKeyEncapsulation` / `HsmKeyEncapsulationExecutor` | ML-KEM-768 Encapsulate/Decapsulate | `HsmCompositeMlKemKeyEncryptionMethodGenerator`, `HsmCompositeMlKemPublicKeyDataDecryptorFactory` (siehe Abschnitt 7) |
 
 Bewusst algorithmusagnostische Ports (`HsmSignature`, `HsmKeyAgreement`) statt eines Ports pro
 Algorithmus: spiegelt reale CCA-Digital-Signature-Verben, die den Algorithmus per
@@ -231,17 +231,15 @@ Handle im HSM-Schlüsselspeicher registrieren (siehe `InMemoryHsmKeyStore`-Nutzu
 im CLI-Demo-Adapter). Ein echter ICSF-Adapter müsste hier stattdessen einen echten
 Public-Key-Import-Schritt vor der eigentlichen Schlüsselaustausch-Operation durchführen.
 
-**PQC (ML-KEM-768+X25519, ML-DSA-65+Ed25519, RFC 9980) ist nicht implementiert.** Die Ports
-`HsmKeyEncapsulation`/`HsmKeyEncapsulationExecutor` existieren bereits (inklusive Dummy-Adapter,
-`DummyHsmKeyEncapsulationExecutor`) und `HsmSignatureAlgorithm.ML_DSA_65_ED25519` ist als
-Enum-Wert definiert — aber keine Bridge-Klasse in `adapters/outbound/openpgp/bc` nutzt sie. Der
-Grund ist paketformatseitig: die in diesem Projekt verwendete `bcpg`-Version (1.85) kennt die
-komposite Paketkodierung für RFC-9980-Algorithmus-IDs 30 (ML-DSA-65+Ed25519) und 35
-(ML-KEM-768+X25519) noch nicht. `PgpKeyMaterialCodec.toBcpgKey(...)` wirft für alle
-Nicht-RSA/ECC-Algorithmen explizit eine `IllegalArgumentException` mit dem Hinweis "PQC ist
-explizit außerhalb des Scopes dieser Iteration". Eine spätere Iteration müsste die
-Paket-/MPI-Strukturen für komposite Public-Key-, Signatur- und Session-Key-Pakete selbst
-nachbauen, statt sie von `bcpg` zu bekommen.
+**Die PQC-Verschlüsselung ML-KEM-768+X25519 (RFC 9980, Algorithmus-ID 35) ist implementiert —
+die PQC-Signatur ML-DSA-65+Ed25519 (Algorithmus-ID 30) noch nicht.** Siehe Abschnitt 7 für die
+Details der kompositen Verschlüsselung. `HsmSignatureAlgorithm.ML_DSA_65_ED25519` ist zwar als
+Enum-Wert definiert, aber keine Bridge-Klasse nutzt ihn — RFC 9980 Section 3.5 erlaubt PQC-Keys
+nur ab v6-Schlüsseln/-Signaturen, mit der einzigen Ausnahme von Algorithmus-ID 35 (auch in
+v4-Verschlüsselungs-Subkeys zulässig, siehe Abschnitt 7.1) — und diese PoC modelliert
+ausschließlich v4-Schlüsselpakete (siehe `PgpKeyMaterialCodec.FIXED_CREATION_TIME`/
+`PublicKeyPacket.VERSION_4`). v6-Paket-Unterstützung (Voraussetzung für ML-DSA-65+Ed25519) ist
+für eine spätere Iteration vorgesehen.
 
 **X25519-Unterstützung auf echtem CCA/ICSF ist unbestätigt.** Der CCA-Realitätscheck (siehe
 Projektplan) zeigt: öffentliche IBM-Dokumentation belegt für Crypto Express8S+ explizit
@@ -255,7 +253,132 @@ dokumentierte Fallback-Empfehlung, im echten Adapter auf klassisches NIST-Kurven
 (Alg-ID 35), die X25519 als klassische Komponente nutzt, und ist damit ein offenes Risiko für
 einen echten ICSF-Adapter, nicht nur für das reine ECC-Profil.
 
-## 6. Demo selbst ausführen
+Was diese vier Punkte für einen produktiven Einsatz konkret bedeuten (Aufwand, Reihenfolge,
+Handlungsoptionen), steht gebündelt in `docs/technical/production-readiness.md`. Hintergrund zu
+Post-Quantum-Kryptographie in OpenPGP allgemein (nicht projektspezifisch) steht in
+`docs/technical/pqc-notes.md`.
+
+## 7. Komposite Post-Quantum-Verschlüsselung (ML-KEM-768+X25519, RFC 9980)
+
+Algorithmus-ID 35 kombiniert ML-KEM-768 (Post-Quantum-KEM, FIPS-203) mit X25519 (klassisches
+ECDH-KEM) zu einem einzigen hybriden Verschlüsselungsverfahren. Diese Bridge implementiert das
+komplett in `adapters/outbound/openpgp/bc`, ohne core/domain oder core/app zu verändern — beide
+waren dafür bereits vorbereitet (`PgpPublicKeyAlgorithm.ML_KEM_768_X25519`,
+`requiresSenderKeyAgreementKey()`, `HsmKeyEncapsulation`/`HsmKeyEncapsulationExecutor`).
+
+### 7.1 Warum `bcpg-jdk18on` 1.85 hier nicht "einfach mitspielt"
+
+Anders als bei RSA/ECDH/X25519 kann diese Bridge für Algorithmus-ID 35 **nicht** die üblichen
+BC-Basisklassen wiederverwenden — `bcpg` 1.85 kennt diese Algorithmus-ID an mehreren Stellen
+schlicht nicht:
+
+- `PublicKeyKeyEncryptionMethodGenerator`s Konstruktor und `encodeEncryptedSessionInfo(byte[])`
+  prüfen den Algorithmus-Tag gegen eine feste, einprogrammierte Liste (RSA, ElGamal, ECDH,
+  X25519/X448, …) und brechen für 35 mit `IllegalArgumentException`/`PGPException` ab.
+- `PublicKeyEncSessionPacket`s **lesender** Konstruktor (der beim Parsen eines PKESK-Pakets über
+  `BCPGInputStream` aufgerufen wird) hat einen Algorithmus-Switch ohne Eintrag für 35 und wirft
+  eine `IOException` — noch bevor eigener Code eingreifen könnte.
+
+Für **Verschlüsselung** genügt es, `PGPKeyEncryptionMethodGenerator` (das schlanke Interface,
+nicht die Basisklasse mit der Algorithmus-Prüfung) direkt zu implementieren
+(`HsmCompositeMlKemKeyEncryptionMethodGenerator`) und das resultierende Paket über
+`PublicKeyEncSessionPacket`s **öffentliche** Kodierungs-Fabrikmethoden
+(`createV3PKESKPacket`/`createV6PKESKPacket`) zu bauen — diese sind, anders als der lesende
+Konstruktor, nicht auf bekannte Algorithmen beschränkt.
+
+Für **Entschlüsselung** reicht das nicht: `PGPObjectFactory`/`PGPEncryptedDataList` können ein
+PKESK-Paket mit Algorithmus-ID 35 grundsätzlich nicht einlesen (siehe oben), sodass dieser Weg
+für die gesamte Nachricht versperrt ist, nicht nur für das PKESK-Paket selbst. Der Codec parst
+das PKESK-Paket deshalb manuell (siehe 7.3) und erzeugt anschließend ein
+`org.bouncycastle.openpgp.PGPSessionKeyEncryptedData` — BCs Gegenstück zu
+`gpg --override-session-key`, das die SEIPD-Entschlüsselungs-/Integritätsprüfungslogik (v1:
+Präfix-Quick-Check + MDC-Vergleich, v2: Chunk-Verifikation) fertig mitbringt — über dessen
+paketsichtbaren Konstruktor per Reflection (`HsmBackedOpenPgpMessageCodec.newSessionKeyEncryptedData(...)`).
+Das funktioniert ohne `--add-opens`, weil sowohl der gepackte Spring-Boot-Jar (`java -jar`) als
+auch die Maven-Surefire-Testausführung `bcpg-jdk18on` auf dem Classpath (unbenanntes Modul) statt
+auf dem Modulpfad laden.
+
+### 7.2 Schlüssel-Kombinierer (`multiKeyCombine`, RFC 9980 Section 4.2.1)
+
+`HsmCompositeMlKemKeyCombiner` implementiert die KEK-Ableitung wortwörtlich:
+
+```
+KEK = SHA3-256(mlkemKeyShare || ecdhKeyShare || ecdhCipherText || ecdhPublicKey ||
+               algId || domSep || len(domSep))
+```
+
+mit `domSep` = UTF-8 `"OpenPGPCompositeKDFv1"` (21 Oktette). Lokale, deterministische Berechnung
+über Standard-JDK-`MessageDigest` — beide Shared Secrets sind zu diesem Zeitpunkt bereits die
+(nicht mehr geheimen) Ausgaben der beiden KEM-Operationen, kein HSM-Bezug nötig. Der
+resultierende KEK verpackt den Sitzungsschlüssel per RFC-3394-AES-Key-Wrap — genau dieselbe
+`HsmAesKeyWrap`-Klasse, die auch das klassische ECDH-Profil bereits verwendet (siehe Abschnitt 4
+des Projektplans zur Wiederverwendung).
+
+### 7.3 PKESK-Byte-Layout (RFC 9980 Section 4.3.1)
+
+`HsmCompositeMlKemPkeskCodec` kapselt das gesamte Byte-Layout, kryptographiefrei:
+
+- **Algorithmus-spezifischer Teil:** `ecdhCipherText(32) || mlkemCipherText(1088) ||
+  len(C,symAlgId)(1) || [symAlgId(1), nur v3] || C`.
+- **Paket-Rahmung:** ein selbst geschriebener, minimaler Leser für OpenPGP-Paket-Header (Tag +
+  Neu-Format-Länge) — reine Framing-Logik, unabhängig vom Algorithmus, die nur deshalb selbst
+  implementiert werden musste, weil `BCPGInputStream` sie nicht isoliert vom
+  algorithmus-spezifischen Parsing anbietet (siehe 7.1).
+- **PKESK-Kopf:** Version (3 oder 6), Schlüssel-ID (v3) bzw. Schlüsselversion+Fingerabdruck (v6),
+  Algorithmus-Byte.
+
+### 7.4 Komposites Schlüsselmaterial und die Zwei-Handle-Konvention
+
+`CompositeMlKemKeyMaterial` setzt das öffentliche Schlüsselmaterial zusammen/zerlegt es
+(`ecdhPublicKey(32) || mlkemPublicKey(1184)`, RFC 9980 Section 4.3.2.1, fixed-length ohne
+MPI-Kodierung) und definiert die Handle-Konvention für Komposit-Empfänger: `PgpKeyReference`
+trägt genau einen `HsmKeyHandle`, das darunter im HSM hinterlegte Schlüsselobjekt ist aber ein
+eigenständiges JCA-`KeyPair` je Teilalgorithmus. Diese Bridge behandelt den primären Handle als
+den des **ML-KEM-Teilschlüssels** und leitet den Handle des **X25519-Teilschlüssels**
+deterministisch per Namenskonvention ab (`<alias>-x25519`) — dasselbe Prinzip wie
+`EphemeralPeerKeyHandles` für das native X25519-Profil (siehe Abschnitt 5). Wer einen
+Komposit-Empfänger registriert (CLI-Demo, Testinfrastruktur), muss beide Teilschlüssel unter den
+jeweils passenden Handles ablegen.
+
+Für die eigentliche ECDH-KEM-Hälfte (Section 4.1.1.1) gilt dieselbe PoC-Vereinfachung wie beim
+nativen X25519-Profil: statt eines je Nachricht neu erzeugten ephemeren Senderschlüssels wird ein
+vorab im HSM vorhandener, statischer Sender-Schlüssel verwendet (`senderKeyAgreementKey`) — die
+ECDH-Punktmultiplikation läuft über `HsmKeyAgreementExecutor`, exakt wie in
+`HsmEcdhPublicKeyKeyEncryptionMethodGenerator`.
+
+`PgpKeyMaterialCodec.CompositeMlKemPublicBCPGKey` bildet die Rohbytes als BC-`BCPGKey` ab. Sie
+**muss** `BCPGObject` erweitern (nicht nur `BCPGKey` implementieren, wie das nie tatsächlich
+serialisierte `NoMaterialBcpgKey`) — `PublicKeyPacket.getEncodedContents()`, von der
+Fingerabdruckberechnung und jedem echten Paket-Schreibvorgang durchlaufen, castet das
+Schlüsselfeld intern unbedingt nach `BCPGObject`.
+
+### 7.5 Korrektheitsnachweis: RFC-9980-Testvektoren statt Interop-Test
+
+Für RSA/ECDH/X25519 demonstriert `HsmBackedOpenPgpMessageCodecInteropTest`
+Standard-Interoperabilität, indem unverändertes Bouncy-Castle-JCE-API eine von dieser Bridge
+erzeugte Nachricht liest. Für Algorithmus-ID 35 ist das **nicht möglich** — dieselbe
+`bcpg`-1.85-Lücke (siehe 7.1), die die eigene Bridge zu den oben beschriebenen Workarounds
+zwingt, verhindert auch, dass unverändertes Bouncy Castle (oder irgendein anderes derzeit
+verfügbares Tool) eine Nachricht mit Algorithmus-ID 35 überhaupt lesen könnte.
+
+Der Korrektheitsnachweis läuft stattdessen über die offiziellen RFC-9980-Testvektoren
+(Appendix A.2, v4-Schlüssel — die für diese PoC relevante Zielgröße laut RFC Section 3.5):
+
+- `HsmCompositeMlKemKeyCombinerTest` reproduziert byte-exakt sowohl den `KEK`-Wert als auch (via
+  `HsmAesKeyWrap`) den Sitzungsschlüssel aus Appendix A.2.3 (v3-PKESK) und A.2.4 (v6-PKESK), mit
+  `mlkemKeyShare`/`ecdhKeyShare` direkt aus dem RFC-Text und `ecdhCipherText`/`ecdhPublicKey`
+  lokal aus den RFC-eigenen armored Schlüssel-/Nachrichten-Blöcken extrahiert.
+- `HsmCompositeMlKemPkeskCodecTest` verifiziert das PKESK-Byte-Layout direkt gegen die
+  entschachtelten (armored, aber sonst unveränderten) RFC-Nachrichten aus Appendix A.2.3/A.2.4.
+
+**Nicht verifiziert:** das Parsen des RFC-eigenen Secret-Key-Blocks durch diese PoC selbst — das
+PoC-Schlüsselmodell kennt nur `HsmKeyHandle`-referenzierte Schlüssel, kein Parsen echter
+Secret-Key-Pakete (dieselbe Einschränkung wie bei jedem anderen Algorithmus dieser Bridge). Der
+vollständige Ende-zu-Ende-Rundlauf-Nachweis (Verschlüsseln→Entschlüsseln) läuft daher mit
+PoC-eigenen, nicht mit RFC-Testschlüsseln — siehe
+`HsmBackedOpenPgpMessageCodecIntegrationTest.encryptThenDecrypt_givenCompositeMlKem768X25519Recipient_thenRecoversPlaintext`.
+
+## 8. Demo selbst ausführen
 
 Kurzfassung — Details (Konfiguration, Voraussetzungen) stehen in der Projekt-`README.md`:
 

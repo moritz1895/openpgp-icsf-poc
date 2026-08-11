@@ -9,6 +9,7 @@ import java.util.List;
 import java.util.Objects;
 import ms.rohde.hexagonalarch.annotations.DrivingAdapter;
 import ms.rohde.openpgpicsfpoc.adapters.outbound.hsm.dummy.InMemoryHsmKeyStore;
+import ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc.CompositeMlKemKeyMaterial;
 import ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc.EphemeralPeerKeyHandles;
 import ms.rohde.openpgpicsfpoc.core.app.DecryptOpenPgpMessageCommand;
 import ms.rohde.openpgpicsfpoc.core.app.EncryptOpenPgpMessageCommand;
@@ -33,7 +34,8 @@ import org.springframework.boot.CommandLineRunner;
 /**
  * Treibender CLI-Demo-Adapter: durchlaeuft beim Anwendungsstart einmalig alle in dieser
  * PoC-Iteration unterstuetzten Algorithmus-/Profil-Kombinationen (RSA, natives X25519, klassisches
- * ECDH/ECDSA-Fallback ueber P-256 - Post-Quantum ist noch nicht implementiert) end-to-end ueber die
+ * ECDH/ECDSA-Fallback ueber P-256, komposites ML-KEM-768+X25519 nach RFC 9980 - die PQC-Signatur
+ * ML-DSA-65+Ed25519 erfordert v6-Schluessel und ist noch nicht implementiert) end-to-end ueber die
  * treibenden Ports dieses Projekts und beendet sich danach - kein Dauerbetrieb, kein HTTP-Port.
  *
  * <p>Da diese PoC keinen Hsm-Keygen-Port kennt (Schluessel gelten als vorab im HSM vorhanden, siehe
@@ -79,7 +81,9 @@ public final class OpenPgpDemoRunner implements CommandLineRunner {
 
     @Override
     public void run(String... args) {
-        LOG.info("Starte OpenPGP-HSM-Demo (RSA, natives X25519, klassisches ECDH/ECDSA-Fallback ueber P-256)...");
+        LOG.info(
+                "Starte OpenPGP-HSM-Demo (RSA, natives X25519, klassisches ECDH/ECDSA-Fallback ueber P-256, "
+                        + "komposites ML-KEM-768+X25519 nach RFC 9980)...");
 
         List<DemoOutcome> outcomes = new ArrayList<>();
         for (DemoRecipient recipient : provisionEncryptionRecipients()) {
@@ -132,6 +136,16 @@ public final class OpenPgpDemoRunner implements CommandLineRunner {
             recipients.add(
                     new DemoRecipient("ECDH P-256 (klassisches Fallback-Profil, RFC 6637)", ecdhRecipient, ecdhSender));
 
+            KeyPair mlKemRecipientEcdhKeyPair = DemoKeyMaterial.generateX25519();
+            KeyPair mlKemRecipientMlKemKeyPair = DemoKeyMaterial.generateMlKem768();
+            PgpKeyReference mlKemRecipient = registerCompositeMlKemRecipient(
+                    "demo-mlkem768-x25519-recipient", mlKemRecipientEcdhKeyPair, mlKemRecipientMlKemKeyPair);
+            KeyPair mlKemSenderKeyPair = DemoKeyMaterial.generateX25519();
+            PgpKeyReference mlKemSender = registerSenderKeyAgreementKey(
+                    "demo-mlkem768-x25519-sender", mlKemSenderKeyPair, DemoKeyMaterial.x25519PublicKey(mlKemSenderKeyPair));
+            recipients.add(new DemoRecipient(
+                    "ML-KEM-768+X25519 (Post-Quantum-Komposit, RFC 9980)", mlKemRecipient, mlKemSender));
+
             return recipients;
         } catch (GeneralSecurityException e) {
             throw new DemoKeyProvisioningException("Demo-Empfaengerschluessel konnten nicht erzeugt werden", e);
@@ -182,6 +196,21 @@ public final class OpenPgpDemoRunner implements CommandLineRunner {
         HsmKeyHandle derivedHandle = EphemeralPeerKeyHandles.deriveFrom(publicKey.encodedKeyMaterial().value());
         keyStore.registerPublicKey(derivedHandle, keyPair.getPublic());
         return reference;
+    }
+
+    /**
+     * Registriert einen ML-KEM-768+X25519-Komposit-Empfaenger: das ML-KEM-Teilschluesselpaar
+     * unter {@code alias} (dem primaeren Handle der zurueckgegebenen
+     * {@code PgpKeyReference}), das X25519-Teilschluesselpaar unter dem davon abgeleiteten
+     * Handle - siehe {@link CompositeMlKemKeyMaterial} fuer die zugrunde liegende
+     * Zwei-Handle-Konvention dieser Bridge fuer Komposit-Empfaenger.
+     */
+    private PgpKeyReference registerCompositeMlKemRecipient(String alias, KeyPair ecdhKeyPair, KeyPair mlKemKeyPair) {
+        var handle = new HsmKeyHandle(alias);
+        keyStore.registerKeyPair(handle, mlKemKeyPair);
+        keyStore.registerKeyPair(CompositeMlKemKeyMaterial.ecdhSubKeyHandle(handle), ecdhKeyPair);
+        PgpPublicKey publicKey = DemoKeyMaterial.compositeMlKem768X25519PublicKey(ecdhKeyPair, mlKemKeyPair);
+        return new PgpKeyReference(handle, publicKey);
     }
 
     private DemoOutcome runEncryptionRoundTrip(DemoRecipient recipient, PgpEncryptionProfile profile) {

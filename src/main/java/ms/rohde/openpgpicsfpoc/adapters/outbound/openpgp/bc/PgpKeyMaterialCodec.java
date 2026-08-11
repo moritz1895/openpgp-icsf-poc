@@ -13,6 +13,8 @@ import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKey;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKeyAlgorithm;
 import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.bcpg.BCPGKey;
+import org.bouncycastle.bcpg.BCPGObject;
+import org.bouncycastle.bcpg.BCPGOutputStream;
 import org.bouncycastle.bcpg.ECDHPublicBCPGKey;
 import org.bouncycastle.bcpg.ECDSAPublicBCPGKey;
 import org.bouncycastle.bcpg.Ed25519PublicBCPGKey;
@@ -55,6 +57,13 @@ final class PgpKeyMaterialCodec {
     static final ASN1ObjectIdentifier NIST_P256_OID = new ASN1ObjectIdentifier("1.2.840.10045.3.1.7");
     static final ASN1ObjectIdentifier NIST_P384_OID = new ASN1ObjectIdentifier("1.3.132.0.34");
 
+    /**
+     * Algorithmus-ID fuer ML-KEM-768+X25519 nach RFC 9980 Section 9.1 (Table 2).
+     * {@code bcpg-jdk18on} 1.85 kennt diesen Wert nicht als benannte
+     * {@link PublicKeyAlgorithmTags}-Konstante - er wird daher als rohe Zahl gefuehrt.
+     */
+    static final int COMPOSITE_ML_KEM_768_X25519_ALGORITHM_TAG = 35;
+
     private static final BcKeyFingerprintCalculator FINGERPRINT_CALCULATOR = new BcKeyFingerprintCalculator();
 
     private PgpKeyMaterialCodec() {}
@@ -92,10 +101,12 @@ final class PgpKeyMaterialCodec {
             case ECDSA -> ecdsaKey(material);
             case X25519 -> new X25519PublicBCPGKey(material);
             case EDDSA -> new Ed25519PublicBCPGKey(material);
+            case ML_KEM_768_X25519 -> new CompositeMlKemPublicBCPGKey(material);
             default ->
                 throw new IllegalArgumentException(
-                        "Algorithmus " + publicKey.algorithm() + " wird von dieser Bridge nicht unterstuetzt (PQC ist"
-                                + " explizit ausserhalb des Scopes dieser Iteration)");
+                        "Algorithmus " + publicKey.algorithm() + " wird von dieser Bridge nicht unterstuetzt (die"
+                                + " Signatur-Seite ML-DSA-65+Ed25519 erfordert v6-Schluessel und ist ausserhalb des"
+                                + " Scopes dieser Iteration)");
         };
     }
 
@@ -147,6 +158,7 @@ final class PgpKeyMaterialCodec {
             case ECDSA -> PublicKeyAlgorithmTags.ECDSA;
             case X25519 -> PublicKeyAlgorithmTags.X25519;
             case EDDSA -> PublicKeyAlgorithmTags.Ed25519;
+            case ML_KEM_768_X25519 -> COMPOSITE_ML_KEM_768_X25519_ALGORITHM_TAG;
             default ->
                 throw new IllegalArgumentException(
                         "Algorithmus " + algorithm + " wird von dieser Bridge nicht unterstuetzt");
@@ -203,6 +215,67 @@ final class PgpKeyMaterialCodec {
      */
     static PGPPrivateKey placeholderPrivateKey(PublicKeyPacket publicKeyPacket, long keyId) {
         return new PGPPrivateKey(keyId, publicKeyPacket, NoMaterialBcpgKey.INSTANCE);
+    }
+
+    /**
+     * Komposit-Schluesselmaterial fuer ML-KEM-768+X25519 (RFC 9980 Section 4.3.2.1):
+     * {@code ecdhPublicKey(32) || mlkemPublicKey(1184)}, insgesamt 1216 Byte, als
+     * <b>fixed-length</b> Rohbytes ohne MPI-Kodierung in das Paket eingebettet.
+     *
+     * <p>{@code bcpg-jdk18on} 1.85 bietet dafuer keine typisierte Schluesselklasse; das
+     * generische {@code OctetArrayBCPGKey} waere zwar strukturell passend, seine
+     * Konstruktoren sind jedoch paketsichtbar (Paket {@code org.bouncycastle.bcpg}) und
+     * von hier aus nicht aufrufbar - diese Klasse erweitert {@link BCPGObject} und
+     * implementiert {@link BCPGKey} daher selbst. <b>Wichtig:</b> {@link BCPGObject} ist hier
+     * Pflicht, ein reines {@code implements BCPGKey} (wie beim aehnlichen, aber nie
+     * tatsaechlich serialisierten {@link NoMaterialBcpgKey}) fuehrt zu einer
+     * {@code ClassCastException} - {@link PublicKeyPacket#getEncodedContents()} (von der
+     * Fingerabdruckberechnung {@link BcKeyFingerprintCalculator} und jedem echten
+     * Paket-Schreibvorgang durchlaufen) castet das Schluesselfeld intern unbedingt nach
+     * {@code BCPGObject} und ruft dessen {@link #encode(BCPGOutputStream)} auf.
+     * {@link BCPGObject#getEncoded()} liefert bereits eine korrekte
+     * Default-Implementierung darauf aufbauend.</p>
+     *
+     * <p>Siehe {@link CompositeMlKemKeyMaterial} fuer das Zerlegen dieser Rohbytes in die
+     * beiden Teilschluessel.</p>
+     */
+    static final class CompositeMlKemPublicBCPGKey extends BCPGObject implements BCPGKey {
+
+        private final byte[] material;
+
+        CompositeMlKemPublicBCPGKey(byte[] material) {
+            if (material.length
+                    != CompositeMlKemKeyMaterial.ECDH_PUBLIC_KEY_LENGTH + CompositeMlKemKeyMaterial.MLKEM_PUBLIC_KEY_LENGTH) {
+                throw new IllegalArgumentException(
+                        "Komposit-Schluesselmaterial muss genau "
+                                + (CompositeMlKemKeyMaterial.ECDH_PUBLIC_KEY_LENGTH
+                                        + CompositeMlKemKeyMaterial.MLKEM_PUBLIC_KEY_LENGTH)
+                                + " Byte lang sein, war " + material.length);
+            }
+            this.material = material.clone();
+        }
+
+        @Override
+        public String getFormat() {
+            return "MLKEM768X25519";
+        }
+
+        @Override
+        public void encode(BCPGOutputStream out) throws IOException {
+            out.write(material);
+        }
+
+        /**
+         * Ueberschreibt bewusst {@link BCPGObject#getEncoded()} (das eine checked
+         * {@code IOException} auswirft) - {@link BCPGKey#getEncoded()} (via
+         * {@code Encodable}) deklariert keine checked Exception, exakt wie es reale
+         * BC-Schluesselklassen (z. B. {@code X25519PublicBCPGKey} ueber
+         * {@code OctetArrayBCPGKey}) an dieser Stelle ebenfalls tun.
+         */
+        @Override
+        public byte[] getEncoded() {
+            return material.clone();
+        }
     }
 
     private enum NoMaterialBcpgKey implements BCPGKey {
