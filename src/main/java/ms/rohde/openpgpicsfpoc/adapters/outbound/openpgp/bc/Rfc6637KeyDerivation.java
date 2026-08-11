@@ -1,13 +1,14 @@
 package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 
 import java.io.ByteArrayOutputStream;
-import java.security.GeneralSecurityException;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.Arrays;
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import org.bouncycastle.bcpg.HashAlgorithmTags;
 import org.bouncycastle.bcpg.SymmetricKeyAlgorithmTags;
+import org.bouncycastle.crypto.digests.SHA256Digest;
+import org.bouncycastle.crypto.generators.HKDFBytesGenerator;
+import org.bouncycastle.crypto.params.HKDFParameters;
 
 /**
  * Lokale, unkritische Schluesselableitung fuer die ECDH-basierten
@@ -36,7 +37,7 @@ final class Rfc6637KeyDerivation {
      */
     static byte[] classicalUserKeyingMaterial(
             byte[] curveOidEncoded, int hashAlgorithmTag, int symmetricKeyAlgorithmTag, byte[] recipientFingerprint) {
-        var out = new ByteArrayOutputStream();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.write(curveOidEncoded, 1, curveOidEncoded.length - 1);
         out.write(18); // PublicKeyAlgorithmTags.ECDH
         out.write(0x03);
@@ -53,7 +54,7 @@ final class Rfc6637KeyDerivation {
      * || Param))}, wobei {@code ZB} die affine X-Koordinate des ECDH-Shared-Secret-Punkts ist.
      */
     static byte[] classicalKdf(int hashAlgorithmTag, int symmetricKeyAlgorithmTag, byte[] zb, byte[] param) {
-        var digest = digestFor(hashAlgorithmTag);
+        MessageDigest digest = digestFor(hashAlgorithmTag);
         digest.update((byte) 0x00);
         digest.update((byte) 0x00);
         digest.update((byte) 0x00);
@@ -69,11 +70,11 @@ final class Rfc6637KeyDerivation {
      * sharedSecret} mit Info {@code "OpenPGP X25519"}.
      */
     static byte[] nativeX25519Kdf(byte[] ephemeralPublicKey, byte[] recipientKeyMaterial, byte[] sharedSecret) {
-        var ikm = new ByteArrayOutputStream();
+        ByteArrayOutputStream ikm = new ByteArrayOutputStream();
         ikm.writeBytes(ephemeralPublicKey);
         ikm.writeBytes(recipientKeyMaterial);
         ikm.writeBytes(sharedSecret);
-        var info = "OpenPGP X25519".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
+        byte[] info = "OpenPGP X25519".getBytes(java.nio.charset.StandardCharsets.US_ASCII);
         return hkdfSha256(ikm.toByteArray(), null, info, 16);
     }
 
@@ -87,38 +88,22 @@ final class Rfc6637KeyDerivation {
         return hkdfSha256(sessionKey, salt, info, outputLength);
     }
 
+    /**
+     * Delegiert an Bouncy Castles {@link HKDFBytesGenerator} (RFC 5869) statt eine eigene
+     * Extract-and-Expand-Schleife zu pflegen - fehlt {@code salt}, verwendet
+     * {@link HKDFParameters} bereits RFC-5869-konform ein Nullen-Array in Hash-Laenge,
+     * daher hier keine eigene Fallback-Behandlung noetig.
+     */
     private static byte[] hkdfSha256(byte[] ikm, byte[] salt, byte[] info, int length) {
-        try {
-            var effectiveSalt = salt != null ? salt : new byte[32];
-            var extractMac = Mac.getInstance("HmacSHA256");
-            extractMac.init(new SecretKeySpec(effectiveSalt, "HmacSHA256"));
-            var prk = extractMac.doFinal(ikm);
-
-            var expandMac = Mac.getInstance("HmacSHA256");
-            expandMac.init(new SecretKeySpec(prk, "HmacSHA256"));
-            var output = new byte[length];
-            byte[] previousBlock = new byte[0];
-            int written = 0;
-            byte counter = 1;
-            while (written < length) {
-                expandMac.reset();
-                expandMac.update(previousBlock);
-                expandMac.update(info);
-                expandMac.update(counter);
-                previousBlock = expandMac.doFinal();
-                int toCopy = Math.min(previousBlock.length, length - written);
-                System.arraycopy(previousBlock, 0, output, written, toCopy);
-                written += toCopy;
-                counter++;
-            }
-            return output;
-        } catch (GeneralSecurityException e) {
-            throw new IllegalStateException("HKDF-SHA256 fehlgeschlagen: " + e.getMessage(), e);
-        }
+        HKDFBytesGenerator generator = new HKDFBytesGenerator(new SHA256Digest());
+        generator.init(new HKDFParameters(ikm, salt, info));
+        byte[] output = new byte[length];
+        generator.generateBytes(output, 0, length);
+        return output;
     }
 
     private static MessageDigest digestFor(int hashAlgorithmTag) {
-        var name =
+        String name =
                 switch (hashAlgorithmTag) {
                     case HashAlgorithmTags.SHA256 -> "SHA-256";
                     case HashAlgorithmTags.SHA384 -> "SHA-384";
@@ -128,7 +113,7 @@ final class Rfc6637KeyDerivation {
                 };
         try {
             return MessageDigest.getInstance(name);
-        } catch (java.security.NoSuchAlgorithmException e) {
+        } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(name + " ist auf dieser JVM nicht verfuegbar", e);
         }
     }

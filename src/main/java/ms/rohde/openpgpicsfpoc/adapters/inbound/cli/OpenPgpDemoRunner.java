@@ -19,7 +19,6 @@ import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
 import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
 import ms.rohde.openpgpicsfpoc.core.domain.OpenPgpMessage;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpEllipticCurve;
-import ms.rohde.openpgpicsfpoc.core.domain.PgpEncryptionProfile;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpPublicKey;
 import ms.rohde.openpgpicsfpoc.ports.inbound.DecryptOpenPgpMessageUseCase;
@@ -44,11 +43,11 @@ import org.springframework.boot.CommandLineRunner;
  * exakt das Vorgehen, das die Integrationstests der Bouncy-Castle-Bridge (siehe
  * {@code adapters.outbound.openpgp.bc}, Testquelle) fuer denselben Zweck verwenden.</p>
  *
- * <p>Fuer jede Verschluesselungs-Empfaenger-Algorithmus-Kombination wird sowohl das klassische
- * Container-Profil ({@link PgpEncryptionProfile#LEGACY_CFB_MDC}) als auch das moderne
- * ({@link PgpEncryptionProfile#AEAD_V2}) einmal komplett verschluesselt und wieder entschluesselt;
- * fuer jeden Signaturalgorithmus wird einmal signiert und wieder verifiziert. Jeder Durchlauf wird
- * einzeln geloggt, am Ende folgt eine Gesamtzusammenfassung.</p>
+ * <p>Fuer jede Verschluesselungs-Empfaenger-Algorithmus-Kombination wird die Nachricht einmal
+ * komplett verschluesselt (stets nach SEIPD v2/AEAD, RFC 9580 - dem einzigen von dieser PoC
+ * unterstuetzten Verschluesselungsprofil, siehe {@link ms.rohde.openpgpicsfpoc.ports.outbound.OpenPgpMessageCodec})
+ * und wieder entschluesselt; fuer jeden Signaturalgorithmus wird einmal signiert und wieder
+ * verifiziert. Jeder Durchlauf wird einzeln geloggt, am Ende folgt eine Gesamtzusammenfassung.</p>
  */
 @DrivingAdapter
 public final class OpenPgpDemoRunner implements CommandLineRunner {
@@ -87,9 +86,7 @@ public final class OpenPgpDemoRunner implements CommandLineRunner {
 
         List<DemoOutcome> outcomes = new ArrayList<>();
         for (DemoRecipient recipient : provisionEncryptionRecipients()) {
-            for (PgpEncryptionProfile profile : PgpEncryptionProfile.values()) {
-                outcomes.add(runEncryptionRoundTrip(recipient, profile));
-            }
+            outcomes.add(runEncryptionRoundTrip(recipient));
         }
         for (LabeledKeyReference signer : provisionSigners()) {
             outcomes.add(runSigningRoundTrip(signer));
@@ -180,7 +177,7 @@ public final class OpenPgpDemoRunner implements CommandLineRunner {
     }
 
     private PgpKeyReference register(String alias, KeyPair keyPair, PgpPublicKey publicKey) {
-        var handle = new HsmKeyHandle(alias);
+        HsmKeyHandle handle = new HsmKeyHandle(alias);
         keyStore.registerKeyPair(handle, keyPair);
         return new PgpKeyReference(handle, publicKey);
     }
@@ -206,21 +203,21 @@ public final class OpenPgpDemoRunner implements CommandLineRunner {
      * Zwei-Handle-Konvention dieser Bridge fuer Komposit-Empfaenger.
      */
     private PgpKeyReference registerCompositeMlKemRecipient(String alias, KeyPair ecdhKeyPair, KeyPair mlKemKeyPair) {
-        var handle = new HsmKeyHandle(alias);
+        HsmKeyHandle handle = new HsmKeyHandle(alias);
         keyStore.registerKeyPair(handle, mlKemKeyPair);
         keyStore.registerKeyPair(CompositeMlKemKeyMaterial.ecdhSubKeyHandle(handle), ecdhKeyPair);
         PgpPublicKey publicKey = DemoKeyMaterial.compositeMlKem768X25519PublicKey(ecdhKeyPair, mlKemKeyPair);
         return new PgpKeyReference(handle, publicKey);
     }
 
-    private DemoOutcome runEncryptionRoundTrip(DemoRecipient recipient, PgpEncryptionProfile profile) {
-        String label = "Verschluesseln/Entschluesseln " + recipient.label() + " / " + profile;
+    private DemoOutcome runEncryptionRoundTrip(DemoRecipient recipient) {
+        String label = "Verschluesseln/Entschluesseln " + recipient.label();
         try {
-            var encryptCommand = new EncryptOpenPgpMessageCommand(
-                    DEMO_PLAINTEXT, recipient.recipient(), recipient.senderKeyAgreementKey(), profile);
+            EncryptOpenPgpMessageCommand encryptCommand = new EncryptOpenPgpMessageCommand(
+                    DEMO_PLAINTEXT, recipient.recipient(), recipient.senderKeyAgreementKey());
             OpenPgpMessage encrypted = encryptUseCase.encrypt(encryptCommand);
 
-            var decryptCommand = new DecryptOpenPgpMessageCommand(encrypted, recipient.recipient());
+            DecryptOpenPgpMessageCommand decryptCommand = new DecryptOpenPgpMessageCommand(encrypted, recipient.recipient());
             ByteSequence decrypted = decryptUseCase.decrypt(decryptCommand);
 
             if (decrypted.equals(DEMO_PLAINTEXT)) {
@@ -238,10 +235,10 @@ public final class OpenPgpDemoRunner implements CommandLineRunner {
     private DemoOutcome runSigningRoundTrip(LabeledKeyReference signer) {
         String label = "Signieren/Verifizieren " + signer.label();
         try {
-            var signCommand = new SignOpenPgpMessageCommand(DEMO_PLAINTEXT, signer.reference());
+            SignOpenPgpMessageCommand signCommand = new SignOpenPgpMessageCommand(DEMO_PLAINTEXT, signer.reference());
             OpenPgpMessage signed = signUseCase.sign(signCommand);
 
-            var verifyCommand = new VerifyOpenPgpSignatureCommand(signed, signer.reference().publicKey());
+            VerifyOpenPgpSignatureCommand verifyCommand = new VerifyOpenPgpSignatureCommand(signed, signer.reference().publicKey());
             boolean valid = verifyUseCase.verify(verifyCommand);
 
             if (valid) {

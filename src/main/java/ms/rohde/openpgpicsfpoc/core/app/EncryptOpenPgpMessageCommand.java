@@ -2,7 +2,6 @@ package ms.rohde.openpgpicsfpoc.core.app;
 
 import java.util.Objects;
 import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
-import ms.rohde.openpgpicsfpoc.core.domain.PgpEncryptionProfile;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import org.jspecify.annotations.Nullable;
 
@@ -19,14 +18,10 @@ import org.jspecify.annotations.Nullable;
  * Forward-Secrecy vorsieht. Fuer RSA-Empfaenger bleibt das Feld leer.</p>
  */
 public record EncryptOpenPgpMessageCommand(
-        ByteSequence plaintext,
-        PgpKeyReference recipient,
-        @Nullable PgpKeyReference senderKeyAgreementKey,
-        PgpEncryptionProfile profile) {
+        ByteSequence plaintext, PgpKeyReference recipient, @Nullable PgpKeyReference senderKeyAgreementKey) {
 
     public EncryptOpenPgpMessageCommand {
         Objects.requireNonNull(plaintext, "plaintext darf nicht null sein");
         Objects.requireNonNull(recipient, "recipient darf nicht null sein");
-        Objects.requireNonNull(profile, "profile darf nicht null sein");
     }
 }

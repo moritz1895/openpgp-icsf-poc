@@ -7,7 +7,9 @@ import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesCipherMode;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryption;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionRequest;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionResult;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmCipherOperation;
+import org.bouncycastle.util.Pack;
 
 /**
  * Gemeinsame Bausteine fuer das moderne, AEAD-basierte Verschluesselungsprofil
@@ -38,13 +40,27 @@ final class HsmAeadChunkCodec {
         this.aaData = aaData.clone();
     }
 
+    /**
+     * RFC 9580 Section 5.13.2 kodiert die Chunk-Groesse nicht direkt in Byte, sondern als
+     * ein Oktett {@code chunkSizeOctet}, das die Chunk-Groesse in Byte auf
+     * {@code 2^(chunkSizeOctet + 6)} festlegt (kleinster zulaessiger Wert 0 ergibt 64 Byte) -
+     * eine platzsparende Kodierung fuer Zweierpotenzen, wie sie auch andernorts im
+     * OpenPGP-Paketformat verwendet wird (vgl. Partial-Body-Length-Kodierung).
+     */
     static long chunkLength(int chunkSizeOctet) {
         return 1L << (chunkSizeOctet + 6);
     }
 
+    /**
+     * Berechnet die Chunk-Nonce nach RFC 9580 Section 5.13.2: die letzten 8 Byte des
+     * 12-Byte-IV-Praefix werden mit dem grossen-Byte-Ende-kodierten Chunk-Index verXORt,
+     * das vordere IV-Praefix bleibt unveraendert - so erhaelt jeder Chunk eine eindeutige,
+     * deterministisch aus seinem Index ableitbare Nonce, ohne dass der IV je Chunk neu
+     * zufaellig gezogen oder explizit im Paket mitgefuehrt werden muss.
+     */
     byte[] nonceForChunk(long chunkIndex) {
         byte[] nonce = iv.clone();
-        byte[] chunkIndexBytes = longToBigEndianBytes(chunkIndex);
+        byte[] chunkIndexBytes = Pack.longToBigEndian(chunkIndex);
         int offset = nonce.length - 8;
         for (int i = 0; i < 8; i++) {
             nonce[offset + i] ^= chunkIndexBytes[i];
@@ -52,14 +68,22 @@ final class HsmAeadChunkCodec {
         return nonce;
     }
 
+    /**
+     * Haengt die 8-Byte-Gesamtlaenge des Klartexts (grosses Byte-Ende) an die
+     * paketkonstanten Additional Authenticated Data ({@code aaData}, siehe Konstruktor)
+     * an - die AAD des abschliessenden Nachrichten-Tags nach RFC 9580 Section 5.13.2.
+     * Da diese Laenge mit authentisiert wird, macht ein davon abweichender Wert (etwa
+     * durch abgeschnittene Uebertragung) die Tag-Pruefung in {@link #verifyFinalTag}
+     * fehlschlagen.
+     */
     byte[] finalTagAssociatedData(long totalPlaintextBytes) {
         byte[] result = Arrays.copyOf(aaData, aaData.length + 8);
-        System.arraycopy(longToBigEndianBytes(totalPlaintextBytes), 0, result, aaData.length, 8);
+        System.arraycopy(Pack.longToBigEndian(totalPlaintextBytes), 0, result, aaData.length, 8);
         return result;
     }
 
     byte[] encryptChunk(byte[] plaintext, long chunkIndex) {
-        var request = HsmAesEncryption.builder()
+        HsmAesEncryptionRequest request = HsmAesEncryption.builder()
                 .sessionKey(ByteSequence.of(messageKey))
                 .cipherMode(HsmAesCipherMode.GCM)
                 .operation(HsmCipherOperation.ENCRYPT)
@@ -67,16 +91,16 @@ final class HsmAeadChunkCodec {
                 .initializationVector(ByteSequence.of(nonceForChunk(chunkIndex)))
                 .additionalAuthenticatedData(ByteSequence.of(aaData))
                 .build();
-        var result = executor.execute(request);
+        HsmAesEncryptionResult result = executor.execute(request);
         return result.output().concat(Objects.requireNonNull(result.authenticationTag())).value();
     }
 
     byte[] decryptChunk(byte[] ciphertextWithTag, long chunkIndex) {
         int ciphertextLength = ciphertextWithTag.length - TAG_LENGTH;
-        var ciphertext = Arrays.copyOfRange(ciphertextWithTag, 0, ciphertextLength);
-        var tag = Arrays.copyOfRange(ciphertextWithTag, ciphertextLength, ciphertextWithTag.length);
+        byte[] ciphertext = Arrays.copyOfRange(ciphertextWithTag, 0, ciphertextLength);
+        byte[] tag = Arrays.copyOfRange(ciphertextWithTag, ciphertextLength, ciphertextWithTag.length);
         try {
-            var request = HsmAesEncryption.builder()
+            HsmAesEncryptionRequest request = HsmAesEncryption.builder()
                     .sessionKey(ByteSequence.of(messageKey))
                     .cipherMode(HsmAesCipherMode.GCM)
                     .operation(HsmCipherOperation.DECRYPT)
@@ -99,7 +123,7 @@ final class HsmAeadChunkCodec {
      * explizit zulaessig, siehe {@link HsmAesEncryptionRequest}).
      */
     byte[] encryptFinalTag(long chunkIndexAfterLast, long totalPlaintextBytes) {
-        var request = HsmAesEncryption.builder()
+        HsmAesEncryptionRequest request = HsmAesEncryption.builder()
                 .sessionKey(ByteSequence.of(messageKey))
                 .cipherMode(HsmAesCipherMode.GCM)
                 .operation(HsmCipherOperation.ENCRYPT)
@@ -107,7 +131,7 @@ final class HsmAeadChunkCodec {
                 .initializationVector(ByteSequence.of(nonceForChunk(chunkIndexAfterLast)))
                 .additionalAuthenticatedData(ByteSequence.of(finalTagAssociatedData(totalPlaintextBytes)))
                 .build();
-        var result = executor.execute(request);
+        HsmAesEncryptionResult result = executor.execute(request);
         return Objects.requireNonNull(result.authenticationTag()).value();
     }
 
@@ -118,7 +142,7 @@ final class HsmAeadChunkCodec {
      */
     void verifyFinalTag(byte[] tag, long chunkIndexAfterLast, long totalPlaintextBytes) {
         try {
-            var request = HsmAesEncryption.builder()
+            HsmAesEncryptionRequest request = HsmAesEncryption.builder()
                     .sessionKey(ByteSequence.of(messageKey))
                     .cipherMode(HsmAesCipherMode.GCM)
                     .operation(HsmCipherOperation.DECRYPT)
@@ -131,14 +155,5 @@ final class HsmAeadChunkCodec {
         } catch (RuntimeException e) {
             throw new OpenPgpDecryptionFailedException("AEAD-Integritaetspruefung des Nachrichten-Tags fehlgeschlagen", e);
         }
-    }
-
-    private static byte[] longToBigEndianBytes(long value) {
-        byte[] result = new byte[8];
-        for (int i = 7; i >= 0; i--) {
-            result[i] = (byte) (value & 0xff);
-            value >>>= 8;
-        }
-        return result;
     }
 }

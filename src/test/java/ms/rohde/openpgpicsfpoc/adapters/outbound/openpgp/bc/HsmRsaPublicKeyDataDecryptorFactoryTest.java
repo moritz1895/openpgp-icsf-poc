@@ -13,6 +13,7 @@ import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmCipherOperation;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryptionExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryptionRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryptionResult;
+import org.bouncycastle.openpgp.PGPException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -64,5 +65,11 @@ class HsmRsaPublicKeyDataDecryptorFactoryTest {
 
         assertThatThrownBy(() -> factory.recoverSessionData(1, new byte[][] {mpiEncoded}, 3))
                 .isInstanceOf(OpenPgpDecryptionFailedException.class);
+    }
+
+    @Test
+    void createDataDecryptor_givenLegacySeipdV1Request_thenThrowsPGPException() {
+        assertThatThrownBy(() -> factory.createDataDecryptor(true, 9, new byte[] {1, 2, 3}))
+                .isInstanceOf(PGPException.class);
     }
 }

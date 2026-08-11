@@ -10,12 +10,14 @@ import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmSignature;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmSignatureAlgorithm;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmSignatureExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmSignatureRequest;
 import org.bouncycastle.bcpg.HashAlgorithmTags;
 import org.bouncycastle.bcpg.PublicKeyAlgorithmTags;
 import org.bouncycastle.openpgp.PGPException;
 import org.bouncycastle.openpgp.PGPPrivateKey;
 import org.bouncycastle.openpgp.operator.PGPContentSigner;
 import org.bouncycastle.openpgp.operator.PGPContentSignerBuilder;
+import org.bouncycastle.util.Arrays;
 
 /**
  * Erzeugt Signaturen fuer RSA-PKCS#1v1.5, ECDSA (klassische Kurven) und
@@ -62,8 +64,8 @@ final class HsmBackedPGPContentSignerBuilder implements PGPContentSignerBuilder 
         } catch (NoSuchAlgorithmException e) {
             throw new PGPException("SHA-256 ist auf dieser JVM nicht verfuegbar", e);
         }
-        var outputStream = new DigestOutputStream(OutputStream.nullOutputStream(), digest);
-        var cachedDigest = new byte[1][];
+        DigestOutputStream outputStream = new DigestOutputStream(OutputStream.nullOutputStream(), digest);
+        byte[][] cachedDigest = new byte[1][];
 
         return new PGPContentSigner() {
             @Override
@@ -75,9 +77,9 @@ final class HsmBackedPGPContentSignerBuilder implements PGPContentSignerBuilder 
             public byte[] getSignature() {
                 byte[] rawDigest = finalDigest(cachedDigest, digest);
                 byte[] hsmInput = keyAlgorithmTag == PublicKeyAlgorithmTags.RSA_GENERAL
-                        ? concat(SHA256_DIGEST_INFO_PREFIX, rawDigest)
+                        ? Arrays.concatenate(SHA256_DIGEST_INFO_PREFIX, rawDigest)
                         : rawDigest;
-                var request = HsmSignature.builder()
+                HsmSignatureRequest request = HsmSignature.builder()
                         .keyHandle(signerKeyHandle)
                         .algorithm(hsmSignatureAlgorithm())
                         .digest(ByteSequence.of(hsmInput))
@@ -134,12 +136,5 @@ final class HsmBackedPGPContentSignerBuilder implements PGPContentSignerBuilder 
             case PublicKeyAlgorithmTags.Ed25519 -> HsmSignatureAlgorithm.EDDSA;
             default -> throw new IllegalArgumentException("Nicht unterstuetzter Signaturalgorithmus: " + keyAlgorithmTag);
         };
-    }
-
-    private static byte[] concat(byte[] a, byte[] b) {
-        byte[] result = new byte[a.length + b.length];
-        System.arraycopy(a, 0, result, 0, a.length);
-        System.arraycopy(b, 0, result, a.length, b.length);
-        return result;
     }
 }

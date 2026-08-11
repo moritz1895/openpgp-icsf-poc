@@ -6,7 +6,9 @@ import ms.rohde.openpgpicsfpoc.core.domain.ByteSequence;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesCipherMode;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryption;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmCipherOperation;
+import org.bouncycastle.util.Pack;
 
 /**
  * RFC-3394-AES-Schluesselverpackung (Key Wrap), bei der jeder einzelne
@@ -34,12 +36,24 @@ final class HsmAesKeyWrap {
         this.kek = kek.clone();
     }
 
+    /**
+     * RFC 3394 Section 2.2.1 "Wrap": zerlegt {@code plaintext} in 8-Byte-Halbbloecke
+     * {@code R[0..n-1]} und verschraenkt sie ueber 6 Runden mit dem 8-Byte-"A"-Register
+     * (initialisiert mit dem RFC-Standard-IV {@link #IV}) - je Runde und Halbblock ein
+     * einzelner AES-ECB-Blockschritt ueber {@link #aesEcbEncryptBlock}. Nach jedem
+     * Blockschritt wird die obere Haelfte des 16-Byte-Ergebnisses mit einem
+     * lauf- und index-abhaengigen Zaehler {@code t} verXORt und bildet das neue "A" -
+     * dieses "Chaining" macht jeden Wrap-Vorgang trotz deterministischer Blockchiffre
+     * ergebnisabhaengig vom gesamten bisherigen Ablauf, nicht nur vom aktuellen Block.
+     * Das Ergebnis ist {@code A || R[0] || ... || R[n-1]}, ein Halbblock (8 Byte) laenger
+     * als {@code plaintext}.
+     */
     byte[] wrap(byte[] plaintext) {
         if (plaintext.length % HALF_BLOCK_LENGTH != 0 || plaintext.length == 0) {
             throw new IllegalArgumentException("plaintext muss ein Vielfaches von 8 Byte und nicht leer sein");
         }
         int n = plaintext.length / HALF_BLOCK_LENGTH;
-        byte[] a = longToBytes(IV);
+        byte[] a = Pack.longToBigEndian(IV);
         byte[][] r = new byte[n][];
         for (int i = 0; i < n; i++) {
             r[i] = Arrays.copyOfRange(plaintext, i * HALF_BLOCK_LENGTH, (i + 1) * HALF_BLOCK_LENGTH);
@@ -47,10 +61,10 @@ final class HsmAesKeyWrap {
 
         for (int j = 0; j < 6; j++) {
             for (int i = 0; i < n; i++) {
-                byte[] block = concat(a, r[i]);
+                byte[] block = org.bouncycastle.util.Arrays.concatenate(a, r[i]);
                 byte[] b = aesEcbEncryptBlock(block);
                 long t = (long) n * j + (i + 1);
-                a = xor(Arrays.copyOfRange(b, 0, HALF_BLOCK_LENGTH), longToBytes(t));
+                a = xor(Arrays.copyOfRange(b, 0, HALF_BLOCK_LENGTH), Pack.longToBigEndian(t));
                 r[i] = Arrays.copyOfRange(b, HALF_BLOCK_LENGTH, BLOCK_LENGTH);
             }
         }
@@ -63,6 +77,16 @@ final class HsmAesKeyWrap {
         return output;
     }
 
+    /**
+     * RFC 3394 Section 2.2.2 "Unwrap": exaktes Gegenstueck zu {@link #wrap(byte[])} -
+     * durchlaeuft dieselben 6 Runden rueckwaerts (absteigender Rundenzaehler {@code j},
+     * absteigender Halbblock-Index {@code i}) mit {@link #aesEcbDecryptBlock} statt
+     * {@code aesEcbEncryptBlock}. Weicht das am Ende zurueckgewonnene "A"-Register vom
+     * erwarteten {@link #IV} ab, wurden entweder ein falscher Schluessel-Wickel-Schluessel
+     * verwendet oder die verpackten Daten manipuliert - beides meldet
+     * {@link HsmAesKeyUnwrapIntegrityException}, RFC 3394s eingebauter
+     * Integritaetsschutz ohne separaten MAC.
+     */
     byte[] unwrap(byte[] wrapped) {
         if (wrapped.length % HALF_BLOCK_LENGTH != 0 || wrapped.length < 2 * HALF_BLOCK_LENGTH) {
             throw new IllegalArgumentException("wrapped hat eine ungueltige Laenge");
@@ -78,15 +102,15 @@ final class HsmAesKeyWrap {
         for (int j = 5; j >= 0; j--) {
             for (int i = n - 1; i >= 0; i--) {
                 long t = (long) n * j + (i + 1);
-                byte[] aXorT = xor(a, longToBytes(t));
-                byte[] block = concat(aXorT, r[i]);
+                byte[] aXorT = xor(a, Pack.longToBigEndian(t));
+                byte[] block = org.bouncycastle.util.Arrays.concatenate(aXorT, r[i]);
                 byte[] b = aesEcbDecryptBlock(block);
                 a = Arrays.copyOfRange(b, 0, HALF_BLOCK_LENGTH);
                 r[i] = Arrays.copyOfRange(b, HALF_BLOCK_LENGTH, BLOCK_LENGTH);
             }
         }
 
-        if (bytesToLong(a) != IV) {
+        if (Pack.bigEndianToLong(a, 0) != IV) {
             throw new HsmAesKeyUnwrapIntegrityException();
         }
 
@@ -106,7 +130,7 @@ final class HsmAesKeyWrap {
     }
 
     private byte[] aesEcbBlock(byte[] block, HsmCipherOperation operation) {
-        var request = HsmAesEncryption.builder()
+        HsmAesEncryptionRequest request = HsmAesEncryption.builder()
                 .sessionKey(ByteSequence.of(kek))
                 .cipherMode(HsmAesCipherMode.ECB)
                 .operation(operation)
@@ -115,35 +139,12 @@ final class HsmAesKeyWrap {
         return executor.execute(request).output().value();
     }
 
-    private static byte[] concat(byte[] left, byte[] right) {
-        byte[] result = new byte[left.length + right.length];
-        System.arraycopy(left, 0, result, 0, left.length);
-        System.arraycopy(right, 0, result, left.length, right.length);
-        return result;
-    }
-
+    /** Byteweises XOR zweier gleich langer Arrays - fuer diese feste Blockgroesse (8 Byte) bietet Bouncy Castle keine eigene Utility-Methode. */
     private static byte[] xor(byte[] left, byte[] right) {
         byte[] result = new byte[left.length];
         for (int i = 0; i < left.length; i++) {
             result[i] = (byte) (left[i] ^ right[i]);
         }
         return result;
-    }
-
-    private static byte[] longToBytes(long value) {
-        byte[] result = new byte[HALF_BLOCK_LENGTH];
-        for (int i = HALF_BLOCK_LENGTH - 1; i >= 0; i--) {
-            result[i] = (byte) (value & 0xff);
-            value >>>= 8;
-        }
-        return result;
-    }
-
-    private static long bytesToLong(byte[] bytes) {
-        long value = 0;
-        for (byte b : bytes) {
-            value = (value << 8) | (b & 0xffL);
-        }
-        return value;
     }
 }

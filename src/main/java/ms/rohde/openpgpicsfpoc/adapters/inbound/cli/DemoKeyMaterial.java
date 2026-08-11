@@ -33,13 +33,13 @@ final class DemoKeyMaterial {
     private DemoKeyMaterial() {}
 
     static KeyPair generateRsa() throws GeneralSecurityException {
-        var generator = KeyPairGenerator.getInstance("RSA");
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
         generator.initialize(2048);
         return generator.generateKeyPair();
     }
 
     static KeyPair generateEc(PgpEllipticCurve curve) throws GeneralSecurityException {
-        var generator = KeyPairGenerator.getInstance("EC");
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("EC");
         generator.initialize(new ECGenParameterSpec(curve == PgpEllipticCurve.P256 ? "secp256r1" : "secp384r1"));
         return generator.generateKeyPair();
     }
@@ -99,13 +99,13 @@ final class DemoKeyMaterial {
     }
 
     private static byte[] rawXdhPoint(KeyPair keyPair) {
-        var xecPublicKey = (XECPublicKey) keyPair.getPublic();
+        XECPublicKey xecPublicKey = (XECPublicKey) keyPair.getPublic();
         byte[] bigEndian = unsignedFixedLength(xecPublicKey.getU(), 32);
         return reverse(bigEndian);
     }
 
     private static byte[] rawEd25519Point(KeyPair keyPair) {
-        var edPublicKey = (EdECPublicKey) keyPair.getPublic();
+        EdECPublicKey edPublicKey = (EdECPublicKey) keyPair.getPublic();
         byte[] bigEndianY = unsignedFixedLength(edPublicKey.getPoint().getY(), 32);
         byte[] littleEndianY = reverse(bigEndianY);
         if (edPublicKey.getPoint().isXOdd()) {

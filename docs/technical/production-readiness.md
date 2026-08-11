@@ -99,17 +99,17 @@ Diese vier Punkte stehen bereits ausführlich in `docs/technical/openpgp-hsm-bri
 Eine PoC muss nicht betriebsbereit sein — für Produktion aber fehlt hier mehr als nur "der echte
 Adapter":
 
-- **Performance der CFB-über-Einzelblock-Konstruktion (SEIPD v1):** `HsmCfbEngine` ruft für
-  *jeden* 16-Byte-Block der Nachricht einen eigenen `HsmAesEncryptionExecutor`-Aufruf auf (siehe
-  Bridge-Doku Abschnitt 3.1). Für eine PoC ist das die didaktisch korrekte, direkte Abbildung der
-  HSM-Primitive — für eine große Nachricht in Produktion bedeutet das potenziell tausende
-  einzelne HSM-Roundtrips (Netzwerk-/Cross-Memory-Latenz pro Call!) statt eines einzigen
-  Bulk-Aufrufs. Handlungsoptionen: (a) in Produktion bevorzugt das AEAD/GCM-Profil (SEIPD v2)
-  verwenden, das über `HsmAeadChunkCodec` bereits in größeren Chunks (4096 Byte) arbeitet, und
-  Legacy-CFB nur für Abwärtskompatibilität mit alten Empfängern vorsehen; (b) prüfen, ob die
-  reale CCA-Symmetric-Key-Encipher/Decipher-Verb-Familie einen echten Bulk-CFB-Modus mit
-  korrektem 128-Bit-Feedback anbietet, der sich (ohne den OpenPGP-spezifischen Null-IV-Sonderfall
-  zu verletzen) direkt für ganze Nachrichten statt Einzelblöcke nutzen ließe.
+- **Performance der Nutzlastverschlüsselung (SEIPD v2/AEAD):** `HsmAeadChunkCodec`/
+  `HsmAeadOutputStream` rufen `HsmAesEncryptionExecutor` je 4096-Byte-Chunk auf (Exponent `12`,
+  siehe Bridge-Doku Abschnitt 3) statt je 16-Byte-Block — für eine große Nachricht in Produktion
+  bedeutet das deutlich weniger HSM-Roundtrips als eine Einzelblock-Konstruktion, aber immer noch
+  einen Roundtrip pro Chunk. (Ein früheres, zusätzliches Legacy-Profil mit echter
+  Einzelblock-Konstruktion — SEIPD v1/CFB — wurde aus dieser PoC entfernt, siehe README,
+  „Bekannte Einschränkungen"; die Chunk-Größe bleibt daher der einzige verbleibende Stellhebel.)
+  Handlungsoption für Produktion: die Chunk-Größe (`AEAD_CHUNK_SIZE_EXPONENT` in
+  `HsmBackedOpenPgpMessageCodec`) gegen reale HSM-Roundtrip-Latenz und den RFC-9580-Höchstwert
+  abwägen — größere Chunks bedeuten weniger Roundtrips, aber mehr Speicherbedarf pro
+  HSM-Aufruf und einen größeren Nachrichtenanteil, der bei einem GCM-Tag-Fehler verworfen wird.
 - **HSM-Erreichbarkeit und Fehlerbehandlung:** Die Dummy-Adapter werfen bei Fehlern
   `HsmDummyOperationException` — ein Platzhalter. Ein echter Adapter muss reale CCA-Rückgabecodes
   (Return/Reason-Codes) auf sinnvolle, für die Anwendungsschicht unterscheidbare Fehlertypen

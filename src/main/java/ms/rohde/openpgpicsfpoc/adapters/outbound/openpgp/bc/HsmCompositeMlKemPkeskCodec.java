@@ -3,6 +3,7 @@ package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 import org.bouncycastle.bcpg.PublicKeyEncSessionPacket;
+import org.bouncycastle.util.Pack;
 
 /**
  * Reine (kryptographiefreie) Byte-Layout-Kodierung/-Dekodierung fuer das PKESK-Paket
@@ -45,7 +46,7 @@ final class HsmCompositeMlKemPkeskCodec {
         if (fieldsLength > 0xFF) {
             throw new IllegalArgumentException("Kombinierte Feldlaenge " + fieldsLength + " uebersteigt ein Oktett");
         }
-        var out = new ByteArrayOutputStream();
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
         out.writeBytes(ecdhCipherText);
         out.writeBytes(mlkemCipherText);
         out.write(fieldsLength);
@@ -90,6 +91,17 @@ final class HsmCompositeMlKemPkeskCodec {
 
     record RawPacket(int tag, byte[] body, int totalLength) {}
 
+    /**
+     * Liest Tag und Koerperlaenge eines einzelnen OpenPGP-Pakets ab {@code offset}
+     * (RFC 9580 Section 4.2). Fuer die neue Paketformat-Kodierung ({@code first &
+     * 0x40 != 0}) legt das erste Laengen-Oktett {@code l1} fest, wie die Koerperlaenge
+     * weiter kodiert ist: unter 192 ist {@code l1} bereits die Laenge selbst; 192-223
+     * kodiert einen zweioktettigen Wert nach einer OpenPGP-spezifischen Formel (kein
+     * einfaches Big-Endian-16-Bit, daher hier weiterhin manuell berechnet); 255 leitet
+     * eine reguleare 4-Byte-Big-Endian-Laenge ein ({@link Pack#bigEndianToInt(byte[], int)});
+     * jeder andere Wert (224-254) waere eine Partial-Body-Length, die fuer das
+     * PKESK-Paket dieser Bridge nicht vorkommen kann.
+     */
     static RawPacket readPacketHeader(byte[] data, int offset) {
         int first = data[offset] & 0xFF;
         if ((first & 0x80) == 0) {
@@ -109,10 +121,7 @@ final class HsmCompositeMlKemPkeskCodec {
             bodyLength = ((l1 - 192) << 8) + (data[offset + 2] & 0xFF) + 192;
             headerLength = 3;
         } else if (l1 == 255) {
-            bodyLength = ((data[offset + 2] & 0xFF) << 24)
-                    | ((data[offset + 3] & 0xFF) << 16)
-                    | ((data[offset + 4] & 0xFF) << 8)
-                    | (data[offset + 5] & 0xFF);
+            bodyLength = Pack.bigEndianToInt(data, offset + 2);
             headerLength = 6;
         } else {
             throw new OpenPgpMessageCodecException(
@@ -137,10 +146,7 @@ final class HsmCompositeMlKemPkeskCodec {
                 headerLength = 3;
             }
             case 2 -> {
-                bodyLength = ((data[offset + 1] & 0xFF) << 24)
-                        | ((data[offset + 2] & 0xFF) << 16)
-                        | ((data[offset + 3] & 0xFF) << 8)
-                        | (data[offset + 4] & 0xFF);
+                bodyLength = Pack.bigEndianToInt(data, offset + 1);
                 headerLength = 5;
             }
             default ->
@@ -165,7 +171,7 @@ final class HsmCompositeMlKemPkeskCodec {
         int keyVersion = 0;
         byte[] fingerprint = new byte[0];
         if (version == PublicKeyEncSessionPacket.VERSION_3) {
-            keyId = readKeyId(body, offset);
+            keyId = Pack.bigEndianToLong(body, offset);
             offset += 8;
         } else if (version == PublicKeyEncSessionPacket.VERSION_6) {
             int keyInfoLength = body[offset++] & 0xFF;
@@ -180,13 +186,5 @@ final class HsmCompositeMlKemPkeskCodec {
         int algorithm = body[offset++] & 0xFF;
         byte[] algorithmSpecificData = Arrays.copyOfRange(body, offset, body.length);
         return new ParsedPkeskHeader(version, keyId, keyVersion, fingerprint, algorithm, algorithmSpecificData);
-    }
-
-    private static long readKeyId(byte[] data, int offset) {
-        long value = 0;
-        for (int i = 0; i < 8; i++) {
-            value = (value << 8) | (data[offset + i] & 0xFFL);
-        }
-        return value;
     }
 }

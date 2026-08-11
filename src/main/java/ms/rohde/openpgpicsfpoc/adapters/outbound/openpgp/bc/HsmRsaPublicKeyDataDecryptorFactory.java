@@ -8,6 +8,7 @@ import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmCipherOperation;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryption;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryptionExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmRsaEncryptionRequest;
 import org.bouncycastle.bcpg.AEADEncDataPacket;
 import org.bouncycastle.bcpg.SymmetricEncIntegrityPacket;
 import org.bouncycastle.openpgp.PGPException;
@@ -17,9 +18,10 @@ import org.bouncycastle.openpgp.operator.PGPDataDecryptor;
 
 /**
  * Loest ein RSA-PKESK-Paket auf und entschluesselt die symmetrisch
- * geschuetzte Nutzlast - fuer beide Verschluesselungsprofile dieser PoC
- * (SEIPD v1/CFB+MDC ueber {@link HsmSymmetricDecryptorSupport#createCfbDecryptor}
- * und SEIPD v2/AEAD ueber {@link HsmSymmetricDecryptorSupport#createAeadDecryptor}).
+ * geschuetzte Nutzlast (SEIPD v2/AEAD ueber
+ * {@link HsmSymmetricDecryptorSupport#createAeadDecryptor} - das aeltere,
+ * MDC-basierte Profil SEIPD v1 wird von dieser PoC nicht unterstuetzt, siehe
+ * {@link #createDataDecryptor(boolean, int, byte[])}).
  * Die private RSA-Operation selbst laeuft ueber {@link HsmRsaEncryptionExecutor}
  * gegen den Schluessel-Handle des Empfaengers.
  */
@@ -51,7 +53,7 @@ final class HsmRsaPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDec
     public byte[] recoverSessionData(int keyAlgorithm, byte[][] secKeyData, int pkeskVersion) {
         byte[] mpiEncoded = secKeyData[0];
         byte[] ciphertext = Arrays.copyOfRange(mpiEncoded, 2, mpiEncoded.length);
-        var request = HsmRsaEncryption.builder()
+        HsmRsaEncryptionRequest request = HsmRsaEncryption.builder()
                 .keyHandle(recipientKeyHandle)
                 .operation(HsmCipherOperation.DECRYPT)
                 .input(ByteSequence.of(ciphertext))
@@ -64,8 +66,10 @@ final class HsmRsaPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDec
     }
 
     @Override
-    public PGPDataDecryptor createDataDecryptor(boolean withIntegrityPacket, int encAlgorithm, byte[] key) {
-        return HsmSymmetricDecryptorSupport.createCfbDecryptor(aesExecutor, key);
+    public PGPDataDecryptor createDataDecryptor(boolean withIntegrityPacket, int encAlgorithm, byte[] key) throws PGPException {
+        throw new PGPException(
+                "SEIPD v1 (Plain-CFB+MDC) wird von dieser PoC nicht unterstuetzt (siehe "
+                        + "Feature-Spezifikation: nur SEIPD v2/AEAD)");
     }
 
     @Override
@@ -73,7 +77,7 @@ final class HsmRsaPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDec
             throws PGPException {
         throw new PGPException(
                 "Legacy-v5-Style-AEAD (LibrePGP/OCB) ist ausserhalb des Scopes dieser PoC (siehe "
-                        + "Feature-Spezifikation: nur SEIPD v1 und SEIPD v2/AEAD)");
+                        + "Feature-Spezifikation: nur SEIPD v2/AEAD)");
     }
 
     @Override

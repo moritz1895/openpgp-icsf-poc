@@ -1,11 +1,13 @@
 package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 
 import java.io.OutputStream;
+import java.math.BigInteger;
 import java.security.DigestOutputStream;
 import java.security.GeneralSecurityException;
 import java.security.KeyFactory;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.EdECPoint;
 import java.security.spec.EdECPublicKeySpec;
@@ -67,14 +69,14 @@ final class HsmBackedPGPContentVerifierBuilderProvider implements PGPContentVeri
         @Override
         public PGPContentVerifier build(PGPPublicKey publicKey) throws PGPException {
             byte[] rawPoint = publicKey.getPublicKeyPacket().getKey().getEncoded();
-            var jcaPublicKey = ed25519PublicKeyFromRawBytes(rawPoint);
+            PublicKey jcaPublicKey = ed25519PublicKeyFromRawBytes(rawPoint);
             MessageDigest digest;
             try {
                 digest = MessageDigest.getInstance("SHA-256");
             } catch (NoSuchAlgorithmException e) {
                 throw new PGPException("SHA-256 ist auf dieser JVM nicht verfuegbar", e);
             }
-            var outputStream = new DigestOutputStream(OutputStream.nullOutputStream(), digest);
+            DigestOutputStream outputStream = new DigestOutputStream(OutputStream.nullOutputStream(), digest);
 
             return new PGPContentVerifier() {
                 @Override
@@ -100,7 +102,7 @@ final class HsmBackedPGPContentVerifierBuilderProvider implements PGPContentVeri
                 @Override
                 public boolean verify(byte[] expectedSignature) {
                     try {
-                        var signature = Signature.getInstance("Ed25519");
+                        Signature signature = Signature.getInstance("Ed25519");
                         signature.initVerify(jcaPublicKey);
                         signature.update(digest.digest());
                         return signature.verify(expectedSignature);
@@ -118,7 +120,7 @@ final class HsmBackedPGPContentVerifierBuilderProvider implements PGPContentVeri
      * oberstes Bit des letzten Bytes kodiert das Vorzeichen der
      * X-Koordinate) - reine JDK-API, keine Bouncy-Castle-Krypto-Implementierung.
      */
-    static java.security.PublicKey ed25519PublicKeyFromRawBytes(byte[] rawPoint) throws PGPException {
+    static PublicKey ed25519PublicKeyFromRawBytes(byte[] rawPoint) throws PGPException {
         try {
             byte[] littleEndianY = rawPoint.clone();
             boolean xOdd = (littleEndianY[31] & 0x80) != 0;
@@ -127,9 +129,9 @@ final class HsmBackedPGPContentVerifierBuilderProvider implements PGPContentVeri
             for (int i = 0; i < 32; i++) {
                 bigEndianY[i] = littleEndianY[31 - i];
             }
-            var y = new java.math.BigInteger(1, bigEndianY);
-            var point = new EdECPoint(xOdd, y);
-            var spec = new EdECPublicKeySpec(NamedParameterSpec.ED25519, point);
+            BigInteger y = new BigInteger(1, bigEndianY);
+            EdECPoint point = new EdECPoint(xOdd, y);
+            EdECPublicKeySpec spec = new EdECPublicKeySpec(NamedParameterSpec.ED25519, point);
             return KeyFactory.getInstance("Ed25519").generatePublic(spec);
         } catch (GeneralSecurityException e) {
             throw new PGPException("Ungueltiges Ed25519-Schluesselmaterial: " + e.getMessage(), e);

@@ -58,10 +58,7 @@ public final class CompositeMlKemKeyMaterial {
         if (mlkemPublicKey.length != MLKEM_PUBLIC_KEY_LENGTH) {
             throw new IllegalArgumentException("mlkemPublicKey muss " + MLKEM_PUBLIC_KEY_LENGTH + " Byte lang sein");
         }
-        byte[] result = new byte[ECDH_PUBLIC_KEY_LENGTH + MLKEM_PUBLIC_KEY_LENGTH];
-        System.arraycopy(ecdhPublicKey, 0, result, 0, ECDH_PUBLIC_KEY_LENGTH);
-        System.arraycopy(mlkemPublicKey, 0, result, ECDH_PUBLIC_KEY_LENGTH, MLKEM_PUBLIC_KEY_LENGTH);
-        return result;
+        return org.bouncycastle.util.Arrays.concatenate(ecdhPublicKey, mlkemPublicKey);
     }
 
     /** Liefert den ECDH-Teilschluessel (erste 32 Byte) aus dem kompositen Schluesselmaterial. */

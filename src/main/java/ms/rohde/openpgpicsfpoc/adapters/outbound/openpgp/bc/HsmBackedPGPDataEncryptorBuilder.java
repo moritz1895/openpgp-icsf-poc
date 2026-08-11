@@ -1,11 +1,10 @@
 package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 
-import java.io.IOException;
 import java.io.OutputStream;
 import java.security.SecureRandom;
+import java.util.Arrays;
 import java.util.Objects;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
-import org.bouncycastle.bcpg.AEADAlgorithmTags;
 import org.bouncycastle.bcpg.SymmetricEncIntegrityPacket;
 import org.bouncycastle.openpgp.PGPException;
 import org.bouncycastle.openpgp.operator.PGPAEADDataEncryptor;
@@ -15,21 +14,19 @@ import org.bouncycastle.openpgp.operator.PGPDigestCalculator;
 
 /**
  * HSM-gestuetzter {@link PGPDataEncryptorBuilder}: erzeugt die symmetrische
- * Nutzlastverschluesselung fuer beide Verschluesselungsprofile dieser PoC.
+ * Nutzlastverschluesselung fuer das einzige von dieser PoC unterstuetzte
+ * Verschluesselungsprofil, SEIPD v2/AEAD (RFC 9580). {@link #build(byte[], byte[])}
+ * leitet den Nachrichtenschluessel und das Nonce-Praefix lokal per HKDF-SHA256
+ * aus Sitzungsschluessel und Salt ab (RFC 9580 Section 5.13.2) und verschluesselt
+ * Chunk-weise per AES-256-GCM ueber {@code HsmAesEncryption}-Aufrufe mit
+ * {@code cipherMode(GCM)}.
  *
- * <ul>
- *   <li><b>Legacy-Profil (SEIPD v1, RFC 4880):</b> {@link #build(byte[])} liefert
- *       einen {@link PGPDataEncryptor}, dessen Ausgabestrom Plain-CFB mit
- *       Null-IV ueber {@link HsmCfbOutputStream} anwendet (siehe dortiges
- *       JavaDoc), zusammengesetzt aus Einzelblock-{@code HsmAesEncryption}-Aufrufen
- *       mit {@code cipherMode(ECB)}. Der MDC-Trailer wird lokal ueber
- *       {@link LocalSha1DigestCalculator} gebildet.</li>
- *   <li><b>Modernes Profil (SEIPD v2/AEAD, RFC 9580):</b> {@link #build(byte[], byte[])}
- *       leitet den Nachrichtenschluessel und das Nonce-Praefix lokal per HKDF-SHA256
- *       aus Sitzungsschluessel und Salt ab (RFC 9580 Section 5.13.2) und
- *       verschluesselt Chunk-weise per AES-256-GCM ueber
- *       {@code HsmAesEncryption}-Aufrufe mit {@code cipherMode(GCM)}.</li>
- * </ul>
+ * <p>Das klassische, MDC-basierte Profil (SEIPD v1, RFC 4880, Plain-CFB) wird
+ * bewusst nicht unterstuetzt (siehe GitHub-Issue "korrekturen zur
+ * implementierung": ein zusaetzliches, kryptographisch schwaecheres Profil
+ * ohne Mehrwert fuer diese PoC haette nur unnoetigen Implementierungs- und
+ * Pflegeaufwand bedeutet) - {@link #build(byte[])} wird von Bouncy Castle nur
+ * fuer dieses Profil aufgerufen und wirft daher immer eine {@link PGPException}.</p>
  */
 final class HsmBackedPGPDataEncryptorBuilder implements PGPDataEncryptorBuilder {
 
@@ -37,7 +34,6 @@ final class HsmBackedPGPDataEncryptorBuilder implements PGPDataEncryptorBuilder 
     private final HsmAesEncryptionExecutor executor;
     private final SecureRandom secureRandom;
 
-    private boolean withIntegrityPacket = true;
     private int aeadAlgorithm = -1;
     private int chunkSizeOctet;
 
@@ -73,7 +69,11 @@ final class HsmBackedPGPDataEncryptorBuilder implements PGPDataEncryptorBuilder 
 
     @Override
     public PGPDataEncryptorBuilder setWithIntegrityPacket(boolean withIntegrityPacket) {
-        this.withIntegrityPacket = withIntegrityPacket;
+        if (!withIntegrityPacket) {
+            throw new IllegalArgumentException(
+                    "Nachrichten ohne Integritaetsschutz werden von dieser PoC nicht unterstuetzt - "
+                            + "nur SEIPD v2/AEAD");
+        }
         return this;
     }
 
@@ -91,7 +91,7 @@ final class HsmBackedPGPDataEncryptorBuilder implements PGPDataEncryptorBuilder 
     public PGPDataEncryptorBuilder setUseV5AEAD() {
         throw new UnsupportedOperationException(
                 "Legacy-v5-Style-AEAD (LibrePGP/OCB) ist ausserhalb des Scopes dieser PoC (siehe "
-                        + "Feature-Spezifikation: nur SEIPD v1 und SEIPD v2/AEAD)");
+                        + "Feature-Spezifikation: nur SEIPD v2/AEAD)");
     }
 
     @Override
@@ -106,10 +106,9 @@ final class HsmBackedPGPDataEncryptorBuilder implements PGPDataEncryptorBuilder 
 
     @Override
     public PGPDataEncryptor build(byte[] keyBytes) throws PGPException {
-        if (aeadAlgorithm > 0) {
-            throw new PGPException("AEAD-Profil benoetigt Salt - build(byte[], byte[]) verwenden");
-        }
-        return new CfbMdcDataEncryptor(keyBytes);
+        throw new PGPException(
+                "SEIPD v1 (Plain-CFB+MDC) wird von dieser PoC nicht unterstuetzt - siehe Klassen-JavaDoc "
+                        + "(nur SEIPD v2/AEAD)");
     }
 
     @Override
@@ -123,33 +122,9 @@ final class HsmBackedPGPDataEncryptorBuilder implements PGPDataEncryptorBuilder 
         int ivLength = 12; // GCM
         byte[] messageKeyAndIv =
                 Rfc6637KeyDerivation.aeadMessageKeyAndIvMaterial(key, salt, hkdfInfo, keyLength + ivLength - 8);
-        byte[] messageKey = java.util.Arrays.copyOfRange(messageKeyAndIv, 0, keyLength);
-        byte[] iv = java.util.Arrays.copyOf(java.util.Arrays.copyOfRange(messageKeyAndIv, keyLength, messageKeyAndIv.length), ivLength);
+        byte[] messageKey = Arrays.copyOfRange(messageKeyAndIv, 0, keyLength);
+        byte[] iv = Arrays.copyOf(Arrays.copyOfRange(messageKeyAndIv, keyLength, messageKeyAndIv.length), ivLength);
         return new AeadDataEncryptor(messageKey, iv, hkdfInfo);
-    }
-
-    private final class CfbMdcDataEncryptor implements PGPDataEncryptor {
-
-        private final byte[] sessionKey;
-
-        CfbMdcDataEncryptor(byte[] sessionKey) {
-            this.sessionKey = sessionKey.clone();
-        }
-
-        @Override
-        public OutputStream getOutputStream(OutputStream out) {
-            return new HsmCfbOutputStream(out, new HsmCfbEngine(executor, sessionKey));
-        }
-
-        @Override
-        public PGPDigestCalculator getIntegrityCalculator() {
-            return withIntegrityPacket ? new LocalSha1DigestCalculator() : null;
-        }
-
-        @Override
-        public int getBlockSize() {
-            return HsmCfbEngine.blockLength();
-        }
     }
 
     private final class AeadDataEncryptor implements PGPAEADDataEncryptor {
@@ -181,7 +156,7 @@ final class HsmBackedPGPDataEncryptorBuilder implements PGPDataEncryptorBuilder 
 
         @Override
         public OutputStream getOutputStream(OutputStream out) {
-            var codec = new HsmAeadChunkCodec(executor, messageKey, iv, aaData);
+            HsmAeadChunkCodec codec = new HsmAeadChunkCodec(executor, messageKey, iv, aaData);
             return new HsmAeadOutputStream(out, codec, chunkSizeOctet);
         }
 

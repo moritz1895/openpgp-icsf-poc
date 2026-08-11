@@ -2,6 +2,7 @@ package ms.rohde.openpgpicsfpoc;
 
 import ms.rohde.hexagonalarch.spring.ArchComponentScan;
 import ms.rohde.openpgpicsfpoc.adapters.outbound.hsm.dummy.InMemoryHsmKeyStore;
+import org.bouncycastle.openpgp.operator.bc.BcKeyFingerprintCalculator;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
@@ -34,5 +35,20 @@ public class OpenPgpIcsfPocApplication {
     @Bean
     public InMemoryHsmKeyStore hsmKeyStore() {
         return new InMemoryHsmKeyStore();
+    }
+
+    /**
+     * {@link BcKeyFingerprintCalculator} ist eine zustandslose Bouncy-Castle-Bibliotheksklasse
+     * ohne eigene {@code @InfrastructureServiceAdapter}-Rolle und wurde vor dieser
+     * Bean-Definition an zwei Stellen ({@code HsmBackedOpenPgpMessageCodec},
+     * {@code PgpKeyMaterialCodec}) redundant als {@code private static final}-Feld
+     * instanziiert - dieselbe Art von versteckter, nicht austauschbarer Kopplung, die
+     * {@link #hsmKeyStore()} oben fuer {@link InMemoryHsmKeyStore} vermeidet. Diese
+     * Composition-Root-Bean-Definition macht sie stattdessen als einzige, injizierte
+     * Instanz verfuegbar.
+     */
+    @Bean
+    public BcKeyFingerprintCalculator bcKeyFingerprintCalculator() {
+        return new BcKeyFingerprintCalculator();
     }
 }

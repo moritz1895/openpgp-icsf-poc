@@ -2,11 +2,13 @@ package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 
 import java.util.Arrays;
 import java.util.Objects;
+import ms.rohde.openpgpicsfpoc.core.domain.PgpEllipticCurve;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmEllipticCurve;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreement;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementRequest;
 import org.bouncycastle.bcpg.AEADEncDataPacket;
 import org.bouncycastle.bcpg.PublicKeyAlgorithmTags;
 import org.bouncycastle.bcpg.PublicKeyEncSessionPacket;
@@ -17,6 +19,7 @@ import org.bouncycastle.openpgp.PGPSessionKey;
 import org.bouncycastle.openpgp.operator.AbstractPublicKeyDataDecryptorFactory;
 import org.bouncycastle.openpgp.operator.PGPDataDecryptor;
 import org.bouncycastle.openpgp.operator.PGPPad;
+import org.bouncycastle.openpgp.operator.bc.BcKeyFingerprintCalculator;
 
 /**
  * Loest ein ECDH- oder natives X25519-PKESK-Paket auf (Gegenstueck zu
@@ -32,12 +35,17 @@ final class HsmEcdhPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDe
     private final HsmKeyAgreementExecutor keyAgreementExecutor;
     private final HsmAesEncryptionExecutor aesExecutor;
     private final PgpKeyReference recipient;
+    private final BcKeyFingerprintCalculator fingerprintCalculator;
 
     HsmEcdhPublicKeyDataDecryptorFactory(
-            HsmKeyAgreementExecutor keyAgreementExecutor, HsmAesEncryptionExecutor aesExecutor, PgpKeyReference recipient) {
+            HsmKeyAgreementExecutor keyAgreementExecutor,
+            HsmAesEncryptionExecutor aesExecutor,
+            PgpKeyReference recipient,
+            BcKeyFingerprintCalculator fingerprintCalculator) {
         this.keyAgreementExecutor = Objects.requireNonNull(keyAgreementExecutor, "keyAgreementExecutor darf nicht null sein");
         this.aesExecutor = Objects.requireNonNull(aesExecutor, "aesExecutor darf nicht null sein");
         this.recipient = Objects.requireNonNull(recipient, "recipient darf nicht null sein");
+        this.fingerprintCalculator = Objects.requireNonNull(fingerprintCalculator, "fingerprintCalculator darf nicht null sein");
     }
 
     /**
@@ -59,6 +67,15 @@ final class HsmEcdhPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDe
         }
     }
 
+    /**
+     * Zerlegt den algorithmus-spezifischen PKESK-Nutzdatenteil fuer natives X25519
+     * (RFC 9580 Section 5.1.6): {@code ephemeralPoint(32) || fieldsLength(1) ||
+     * [symAlgId(1)] || wrappedSessionKey}. {@code fieldsLength} zaehlt die Bytes ab
+     * {@code symAlgId} (falls vorhanden) bis zum Ende - bei einem v6-PKESK
+     * ({@code !includesSessionKeyAlgorithm}) entfaellt das {@code symAlgId}-Feld, daher
+     * verschieben sich sowohl {@code sessionKeyOffset} als auch die aus
+     * {@code fieldsLength} berechnete {@code sessionKeyLength} um je ein Byte.
+     */
     private byte[] recoverNativeX25519(byte[] enc, boolean includesSessionKeyAlgorithm) {
         int pointLength = X25519PublicBCPGKey.LENGTH;
         byte[] ephemeralPoint = Arrays.copyOf(enc, pointLength);
@@ -73,6 +90,15 @@ final class HsmEcdhPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDe
         return new HsmAesKeyWrap(aesExecutor, kek).unwrap(wrappedSessionKey);
     }
 
+    /**
+     * Zerlegt den algorithmus-spezifischen PKESK-Nutzdatenteil fuer das klassische
+     * ECDH-Fallback-Profil (RFC 6637 Section 8): {@code pointBitLength(2, big-endian) ||
+     * ephemeralPoint || fieldsLength(1) || wrappedSessionInfo}. Der Punkt ist - anders als
+     * beim nativen X25519-Profil oben - als MPI kodiert, also mit einer fuehrenden
+     * Bitlaenge statt fester Byte-Laenge (RFC 6637 traegt beliebige NIST-Kurven, deren
+     * Punktlaenge erst zur Laufzeit aus dieser Bitlaenge folgt: {@code (pointBitLength +
+     * 7) / 8} rundet dabei auf ganze Bytes auf).
+     */
     private byte[] recoverClassicalEcdh(byte[] enc) throws PGPException {
         int pointBitLength = ((enc[0] & 0xff) << 8) + (enc[1] & 0xff);
         int pointLength = (pointBitLength + 7) / 8;
@@ -82,8 +108,8 @@ final class HsmEcdhPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDe
         int keyOffset = 2 + pointLength + 1;
         byte[] wrappedSessionInfo = Arrays.copyOfRange(enc, keyOffset, keyOffset + fieldsLength);
 
-        var curve = recipient.publicKey().curve();
-        var algorithmPair = PgpKeyMaterialCodec.classicalEcdhAlgorithmPair(curve);
+        PgpEllipticCurve curve = recipient.publicKey().curve();
+        int[] algorithmPair = PgpKeyMaterialCodec.classicalEcdhAlgorithmPair(curve);
         int hashAlgorithm = algorithmPair[0];
         int symmetricKeyAlgorithm = algorithmPair[1];
         byte[] curveOidEncoded;
@@ -93,7 +119,7 @@ final class HsmEcdhPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDe
             throw new PGPException("Kurven-OID-Kodierung fehlgeschlagen: " + e.getMessage(), e);
         }
         byte[] recipientFingerprint =
-                PgpKeyMaterialCodec.toPgpPublicKey(recipient.publicKey()).getFingerprint();
+                PgpKeyMaterialCodec.toPgpPublicKey(recipient.publicKey(), fingerprintCalculator).getFingerprint();
 
         byte[] sharedSecret = sharedSecretFor(PgpKeyMaterialCodec.toHsmCurve(curve), ephemeralPoint);
         byte[] userKeyingMaterial = Rfc6637KeyDerivation.classicalUserKeyingMaterial(
@@ -104,7 +130,7 @@ final class HsmEcdhPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDe
     }
 
     private byte[] sharedSecretFor(HsmEllipticCurve curve, byte[] ephemeralPoint) {
-        var request = HsmKeyAgreement.builder()
+        HsmKeyAgreementRequest request = HsmKeyAgreement.builder()
                 .curve(curve)
                 .localKeyHandle(recipient.keyHandle())
                 .peerKeyHandle(EphemeralPeerKeyHandles.deriveFrom(ephemeralPoint))
@@ -113,8 +139,10 @@ final class HsmEcdhPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDe
     }
 
     @Override
-    public PGPDataDecryptor createDataDecryptor(boolean withIntegrityPacket, int encAlgorithm, byte[] key) {
-        return HsmSymmetricDecryptorSupport.createCfbDecryptor(aesExecutor, key);
+    public PGPDataDecryptor createDataDecryptor(boolean withIntegrityPacket, int encAlgorithm, byte[] key) throws PGPException {
+        throw new PGPException(
+                "SEIPD v1 (Plain-CFB+MDC) wird von dieser PoC nicht unterstuetzt (siehe "
+                        + "Feature-Spezifikation: nur SEIPD v2/AEAD)");
     }
 
     @Override
@@ -122,7 +150,7 @@ final class HsmEcdhPublicKeyDataDecryptorFactory extends AbstractPublicKeyDataDe
             throws PGPException {
         throw new PGPException(
                 "Legacy-v5-Style-AEAD (LibrePGP/OCB) ist ausserhalb des Scopes dieser PoC (siehe "
-                        + "Feature-Spezifikation: nur SEIPD v1 und SEIPD v2/AEAD)");
+                        + "Feature-Spezifikation: nur SEIPD v2/AEAD)");
     }
 
     @Override

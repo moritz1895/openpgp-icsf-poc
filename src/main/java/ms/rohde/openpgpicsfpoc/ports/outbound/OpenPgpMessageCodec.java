@@ -21,7 +21,7 @@ import ms.rohde.openpgpicsfpoc.core.domain.OpenPgpMessage;
  * ({@code PublicKeyKeyEncryptionMethodGenerator}, {@code PGPContentSignerBuilder},
  * ...) auf, die intern die Hsm-Executor-Ports ansprechen. Die
  * Anwendungsschicht kann diese Hsm-Operationen daher nicht mehr selbst
- * vorwegnehmen, sondern uebergibt Klartext/Empfaenger/Profil/Schluesselreferenzen
+ * vorwegnehmen, sondern uebergibt Klartext/Empfaenger/Schluesselreferenzen
  * unveraendert an diesen Port (siehe Projektplan, Abschnitt "Kernidee der
  * technischen Loesung"). Die konkrete Implementierung folgt in einer
  * Folge-Iteration als Bouncy-Castle-Bridge-Adapter; eine Dummy-Implementierung
@@ -35,7 +35,8 @@ public interface OpenPgpMessageCodec {
      * Verschluesselt den Klartext aus der Anfrage vollstaendig zu einer
      * fertigen OpenPGP-Nachricht - einschliesslich Sitzungsschluessel-Erzeugung,
      * dessen Verpackung/Ableitung fuer den Empfaenger sowie der
-     * Nutzlastverschluesselung im gewaehlten Verschluesselungsprofil.
+     * Nutzlastverschluesselung nach SEIPD v2/AEAD (RFC 9580; das einzige von
+     * dieser PoC unterstuetzte Verschluesselungsprofil).
      */
     OpenPgpMessage encrypt(OpenPgpEncryptionRequest request);
 

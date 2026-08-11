@@ -51,8 +51,8 @@ public final class EphemeralPeerKeyHandles {
 
     public static HsmKeyHandle deriveFrom(byte[] rawPublicKeyMaterial) {
         try {
-            var digest = MessageDigest.getInstance(DIGEST_ALGORITHM);
-            var hash = digest.digest(rawPublicKeyMaterial);
+            MessageDigest digest = MessageDigest.getInstance(DIGEST_ALGORITHM);
+            byte[] hash = digest.digest(rawPublicKeyMaterial);
             return new HsmKeyHandle(HANDLE_PREFIX + HexFormat.of().formatHex(hash));
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException(DIGEST_ALGORITHM + " ist auf dieser JVM nicht verfuegbar", e);

@@ -1,14 +1,18 @@
 package ms.rohde.openpgpicsfpoc.adapters.outbound.openpgp.bc;
 
 import java.util.Objects;
+import ms.rohde.openpgpicsfpoc.core.domain.HsmKeyHandle;
 import ms.rohde.openpgpicsfpoc.core.domain.PgpKeyReference;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmAesEncryptionExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmEllipticCurve;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreement;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementExecutor;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyAgreementRequest;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulation;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationExecutor;
 import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationOperation;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationRequest;
+import ms.rohde.openpgpicsfpoc.ports.outbound.hsm.HsmKeyEncapsulationResult;
 import org.bouncycastle.bcpg.ContainedPacket;
 import org.bouncycastle.bcpg.PublicKeyEncSessionPacket;
 import org.bouncycastle.openpgp.PGPException;
@@ -82,9 +86,9 @@ final class HsmCompositeMlKemKeyEncryptionMethodGenerator implements PGPKeyEncry
 
         byte[] recipientCompositeMaterial = recipient.publicKey().encodedKeyMaterial().value();
         byte[] recipientEcdhPublicKey = CompositeMlKemKeyMaterial.ecdhPublicKeyPart(recipientCompositeMaterial);
-        var recipientEcdhSubKeyHandle = CompositeMlKemKeyMaterial.ecdhSubKeyHandle(recipient.keyHandle());
+        HsmKeyHandle recipientEcdhSubKeyHandle = CompositeMlKemKeyMaterial.ecdhSubKeyHandle(recipient.keyHandle());
 
-        var agreementRequest = HsmKeyAgreement.builder()
+        HsmKeyAgreementRequest agreementRequest = HsmKeyAgreement.builder()
                 .curve(HsmEllipticCurve.X25519)
                 .localKeyHandle(senderKeyAgreementKey.keyHandle())
                 .peerKeyHandle(recipientEcdhSubKeyHandle)
@@ -92,11 +96,11 @@ final class HsmCompositeMlKemKeyEncryptionMethodGenerator implements PGPKeyEncry
         byte[] ecdhKeyShare = keyAgreementExecutor.execute(agreementRequest).sharedSecret().value();
         byte[] ecdhCipherText = senderKeyAgreementKey.publicKey().encodedKeyMaterial().value();
 
-        var encapsulationRequest = HsmKeyEncapsulation.builder()
+        HsmKeyEncapsulationRequest encapsulationRequest = HsmKeyEncapsulation.builder()
                 .keyHandle(recipient.keyHandle())
                 .operation(HsmKeyEncapsulationOperation.ENCAPSULATE)
                 .build();
-        var encapsulationResult = keyEncapsulationExecutor.execute(encapsulationRequest);
+        HsmKeyEncapsulationResult encapsulationResult = keyEncapsulationExecutor.execute(encapsulationRequest);
         byte[] mlkemKeyShare = encapsulationResult.sharedSecret().value();
         byte[] mlkemCipherText = Objects.requireNonNull(
                         encapsulationResult.encapsulatedKey(), "ENCAPSULATE muss ein Chiffrat liefern")
